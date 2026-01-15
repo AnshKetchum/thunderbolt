@@ -1,0 +1,55 @@
+name: Thunderbolt Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-test.txt
+        pip install -e .
+    
+    - name: Build Docker image for tests
+      run: |
+        docker build -t thunderbolt:test .
+    
+    - name: Run pytest
+      run: |
+        pytest tests/test_protocol.py -v -s --timeout=180 --tb=short
+      env:
+        PYTHONUNBUFFERED: 1
+    
+    - name: Upload test logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-logs
+        path: |
+          *.log
+          /tmp/thunderbolt-*.log
+    
+    - name: Cleanup Docker resources
+      if: always()
+      run: |
+        # Clean up any remaining containers
+        docker ps -a --filter "name=thunderbolt" -q | xargs -r docker rm -f || true
+        # Clean up test networks
+        docker network ls --filter "name=thunderbolt-test" -q | xargs -r docker network rm || true
+        # Clean up dangling images
+        docker image prune -f || true

@@ -1,0 +1,15 @@
+# Testing framework
+pytest>=7.4.0
+pytest-timeout>=2.1.0
+pytest-cov>=4.1.0
+
+# Docker SDK for Python
+docker>=6.1.0
+
+# Logging and utilities
+colorlog>=6.7.0
+
+# Thunderbolt package (for API imports in tests)
+# When testing locally, the package will be installed via `pip install -e .`
+# For CI/CD or external testing, uncomment the line below:
+# git+https://github.com/AnshKetchum/thunderbolt.git@main
