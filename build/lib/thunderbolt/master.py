@@ -10,7 +10,7 @@ from datetime import datetime
 import os
 from contextlib import asynccontextmanager
 
-class ThunderboltMaster:
+class ThunderBoltMaster:
     """Master node that manages slave connections and executes commands."""
     
     def __init__(
@@ -268,5 +268,5 @@ class ThunderboltMaster:
         uvicorn.run(self.app, host=host, port=api_port)
 
 if __name__ == "__main__":
-    master = ThunderboltMaster()
+    master = ThunderBoltMaster()
     master.run()
