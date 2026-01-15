@@ -35,15 +35,6 @@ jobs:
       env:
         PYTHONUNBUFFERED: 1
     
-    - name: Upload test logs on failure
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: test-logs
-        path: |
-          *.log
-          /tmp/thunderbolt-*.log
-    
     - name: Cleanup Docker resources
       if: always()
       run: |
