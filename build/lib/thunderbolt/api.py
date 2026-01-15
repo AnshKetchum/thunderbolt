@@ -6,7 +6,7 @@ import requests
 from typing import List, Optional, Dict, Any
 
 
-class ThunderBoltAPI:
+class ThunderboltAPI:
     """Client for interacting with the Master Command Runner API."""
     
     def __init__(self, host: str = "localhost", port: int = 8001):

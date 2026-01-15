@@ -1,2 +1,2 @@
-from .api import ThunderBoltAPI
+from .api import ThunderboltAPI
 

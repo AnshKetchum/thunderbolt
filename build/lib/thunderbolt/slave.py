@@ -7,7 +7,7 @@ import socket
 import subprocess
 from typing import Optional
 
-class ThunderBoltSlave:
+class ThunderboltSlave:
     """Slave node that connects to master and executes commands."""
     
     def __init__(
@@ -131,5 +131,5 @@ class ThunderBoltSlave:
         asyncio.run(self.connect_to_master())
 
 if __name__ == "__main__":
-    slave = ThunderBoltSlave()
+    slave = ThunderboltSlave()
     slave.run()
