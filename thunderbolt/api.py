@@ -9,15 +9,17 @@ from typing import List, Optional, Dict, Any
 class ThunderboltAPI:
     """Client for interacting with the Master Command Runner API."""
     
-    def __init__(self, host: str = "localhost", port: int = 8001):
+    def __init__(self, host: str = "localhost", port: int = 8001, base_path: str = ""):
         """
         Initialize the Master API client.
         
         Args:
             host: Master server hostname or IP
             port: Master server REST API port (default: 8001)
+            base_path: Base path prefix for the API (e.g., "/thunderbolt")
         """
-        self.base_url = f"http://{host}:{port}"
+        self.base_path = base_path.rstrip("/")  # Remove trailing slash if present
+        self.base_url = f"http://{host}:{port}{self.base_path}"
         self.session = requests.Session()
     
     def list_nodes(self) -> Dict[str, Any]:
@@ -141,64 +143,3 @@ class ThunderboltAPI:
         """Context manager exit."""
         self.close()
 
-
-# Example usage
-if __name__ == "__main__":
-    # Using context manager (recommended)
-    with ThunderBoltAPI(host="localhost", port=8001) as api:
-        # List all nodes
-        print("=" * 60)
-        print("Connected Nodes:")
-        print("=" * 60)
-        nodes_data = api.list_nodes()
-        print(f"Total: {nodes_data['total']}")
-        for node in nodes_data['nodes']:
-            print(f"  • {node['hostname']}")
-            print(f"    Last seen: {node['last_seen']}")
-            print(f"    Failed health checks: {node['failed_healthchecks']}")
-        print()
-        
-        # Run command on specific nodes
-        if nodes_data['nodes']:
-            hostname = nodes_data['nodes'][0]['hostname']
-            print("=" * 60)
-            print(f"Running 'pwd' on {hostname}")
-            print("=" * 60)
-            
-            result = api.run_command(
-                command="pwd",
-                nodes=[hostname],
-                timeout=30,
-                use_sudo=False
-            )
-            
-            print(f"Command: {result['command']}")
-            print(f"Responses: {result['responses_received']}/{result['total_nodes']}")
-            print()
-            
-            for host, res in result['results'].items():
-                print(f"Node: {host}")
-                print(f"  Status: {res['status']}")
-                print(f"  Return code: {res['returncode']}")
-                if res['stdout']:
-                    print(f"  Output: {res['stdout'].strip()}")
-                if res['stderr']:
-                    print(f"  Error: {res['stderr'].strip()}")
-            print()
-            
-            # Run on all nodes
-            print("=" * 60)
-            print("Running 'hostname' on all nodes")
-            print("=" * 60)
-            
-            result = api.run_on_all_nodes(command="hostname")
-            for host, res in result['results'].items():
-                if res['status'] == 'success':
-                    print(f"  {host}: {res['stdout'].strip()}")
-        else:
-            print("No nodes connected. Start some slaves first!")
-    
-    # Or use without context manager
-    # api = ThunderBoltAPI()
-    # nodes = api.list_nodes()
-    # api.close()
