@@ -10,6 +10,7 @@ from datetime import datetime
 import os
 from contextlib import asynccontextmanager
 
+
 class ThunderboltMaster:
     """Master node that manages slave connections and executes commands."""
     
@@ -32,6 +33,11 @@ class ThunderboltMaster:
         # Store pending command responses
         self.pending_commands: Dict[str, dict] = {}
         # command_id -> {"responses": {}, "total_nodes": int, "event": asyncio.Event()}
+        
+        # Track background tasks
+        self.background_tasks: List[asyncio.Task] = []
+        self.websocket_server_obj = None
+        self._shutdown_event = asyncio.Event()
         
         # Create router
         self.router = self._create_router()
@@ -87,7 +93,7 @@ class ThunderboltMaster:
                 )
             
             # Send all commands
-            await asyncio.gather(*send_tasks)
+            await asyncio.gather(*send_tasks, return_exceptions=True)
             
             # Wait for all responses (with timeout)
             try:
@@ -136,7 +142,7 @@ class ThunderboltMaster:
         
         @router.get("/health")
         async def health():
-            return {"status": "healthy", "slaves": len(self.slaves)}
+            return {"status": "healthy", "connected_slaves": len(self.slaves)}
         
         return router
     
@@ -172,7 +178,7 @@ class ThunderboltMaster:
                 "hostname": hostname
             }))
             
-            print(f"Slave registered: {hostname}")
+            print(f"[Thunderbolt] Slave registered: {hostname}")
             
             # Handle incoming messages from slave
             async for message in websocket:
@@ -192,56 +198,146 @@ class ThunderboltMaster:
                             self.pending_commands[command_id]["event"].set()
         
         except websockets.exceptions.ConnectionClosed:
-            print(f"Slave disconnected: {hostname}")
+            print(f"[Thunderbolt] Slave disconnected: {hostname}")
+        except asyncio.CancelledError:
+            print(f"[Thunderbolt] Connection cancelled for: {hostname}")
+            raise
         except Exception as e:
-            print(f"Error handling slave {hostname}: {e}")
+            print(f"[Thunderbolt] Error handling slave {hostname}: {e}")
         finally:
             if hostname and hostname in self.slaves:
                 del self.slaves[hostname]
-                print(f"Removed slave: {hostname}")
+                print(f"[Thunderbolt] Removed slave: {hostname}")
     
     async def health_check_loop(self):
         """Periodically health check all slaves."""
-        while True:
-            await asyncio.sleep(self.health_check_interval)
-            
-            disconnected_slaves = []
-            
-            for hostname, slave_info in list(self.slaves.items()):
+        try:
+            while not self._shutdown_event.is_set():
                 try:
-                    # Send health check
-                    await slave_info["websocket"].send(json.dumps({
-                        "type": "healthcheck"
-                    }))
-                    
-                    # Increment failed counter (will be reset if response received)
-                    slave_info["failed_healthchecks"] += 1
-                    
-                    # Check if slave has failed too many health checks
-                    if slave_info["failed_healthchecks"] >= self.max_failed_healthchecks:
-                        print(f"Slave {hostname} failed {self.max_failed_healthchecks} health checks. Disconnecting.")
-                        disconnected_slaves.append(hostname)
-                        await slave_info["websocket"].close()
+                    await asyncio.wait_for(
+                        self._shutdown_event.wait(),
+                        timeout=self.health_check_interval
+                    )
+                    break  # Shutdown requested
+                except asyncio.TimeoutError:
+                    pass  # Normal timeout, continue with health check
                 
-                except Exception as e:
-                    print(f"Health check failed for {hostname}: {e}")
-                    disconnected_slaves.append(hostname)
-            
-            # Remove disconnected slaves
-            for hostname in disconnected_slaves:
-                if hostname in self.slaves:
-                    del self.slaves[hostname]
+                disconnected_slaves = []
+                
+                for hostname, slave_info in list(self.slaves.items()):
+                    try:
+                        # Send health check
+                        await slave_info["websocket"].send(json.dumps({
+                            "type": "healthcheck"
+                        }))
+                        
+                        # Increment failed counter (will be reset if response received)
+                        slave_info["failed_healthchecks"] += 1
+                        
+                        # Check if slave has failed too many health checks
+                        if slave_info["failed_healthchecks"] >= self.max_failed_healthchecks:
+                            print(f"[Thunderbolt] Slave {hostname} failed {self.max_failed_healthchecks} health checks. Disconnecting.")
+                            disconnected_slaves.append(hostname)
+                            await slave_info["websocket"].close()
+                    
+                    except Exception as e:
+                        print(f"[Thunderbolt] Health check failed for {hostname}: {e}")
+                        disconnected_slaves.append(hostname)
+                
+                # Remove disconnected slaves
+                for hostname in disconnected_slaves:
+                    if hostname in self.slaves:
+                        del self.slaves[hostname]
+        
+        except asyncio.CancelledError:
+            print("[Thunderbolt] Health check loop cancelled")
+            raise
+        except Exception as e:
+            print(f"[Thunderbolt] Health check loop error: {e}")
     
     async def websocket_server(self):
         """Run the WebSocket server for slave connections."""
-        async with serve(self.handle_slave_connection, "0.0.0.0", self.port):
-            print(f"WebSocket server listening on port {self.port}")
-            await asyncio.Future()  # run forever
+        try:
+            self.websocket_server_obj = await serve(
+                self.handle_slave_connection, 
+                "0.0.0.0", 
+                self.port,
+                ping_interval=20,
+                ping_timeout=10
+            )
+            print(f"[Thunderbolt] WebSocket server listening on port {self.port}")
+            
+            # Wait for shutdown signal
+            await self._shutdown_event.wait()
+            
+            # Close the server
+            self.websocket_server_obj.close()
+            await self.websocket_server_obj.wait_closed()
+            print("[Thunderbolt] WebSocket server closed")
+            
+        except asyncio.CancelledError:
+            print("[Thunderbolt] WebSocket server cancelled")
+            if self.websocket_server_obj:
+                self.websocket_server_obj.close()
+                await self.websocket_server_obj.wait_closed()
+            raise
+        except Exception as e:
+            print(f"[Thunderbolt] WebSocket server error: {e}")
+            raise
     
-    def start_background_tasks(self):
+    def start_background_tasks(self) -> List[asyncio.Task]:
         """Start websocket server and health check loop as background tasks."""
-        asyncio.create_task(self.websocket_server())
-        asyncio.create_task(self.health_check_loop())
+        print("[Thunderbolt] Starting background tasks...")
+        
+        # Clear shutdown event
+        self._shutdown_event.clear()
+        
+        # Create tasks
+        ws_task = asyncio.create_task(
+            self.websocket_server(),
+            name="thunderbolt-websocket"
+        )
+        health_task = asyncio.create_task(
+            self.health_check_loop(),
+            name="thunderbolt-health-check"
+        )
+        
+        self.background_tasks = [ws_task, health_task]
+        
+        print(f"[Thunderbolt] Started {len(self.background_tasks)} background tasks")
+        return self.background_tasks
+    
+    async def shutdown(self):
+        """Gracefully shutdown the master server."""
+        print("[Thunderbolt] Initiating shutdown...")
+        
+        # Signal shutdown
+        self._shutdown_event.set()
+        
+        # Close all slave connections
+        close_tasks = []
+        for hostname, slave_info in list(self.slaves.items()):
+            try:
+                close_tasks.append(slave_info["websocket"].close())
+            except Exception as e:
+                print(f"[Thunderbolt] Error closing connection to {hostname}: {e}")
+        
+        if close_tasks:
+            await asyncio.gather(*close_tasks, return_exceptions=True)
+        
+        # Cancel all background tasks
+        for task in self.background_tasks:
+            if not task.done():
+                task.cancel()
+        
+        # Wait for tasks to complete
+        if self.background_tasks:
+            await asyncio.gather(*self.background_tasks, return_exceptions=True)
+        
+        self.slaves.clear()
+        self.background_tasks.clear()
+        
+        print("[Thunderbolt] Shutdown complete")
     
     def _create_app(self) -> FastAPI:
         """Create the FastAPI app with lifespan management."""
@@ -250,8 +346,8 @@ class ThunderboltMaster:
             # Startup
             self.start_background_tasks()
             yield
-            # Shutdown (if needed)
-            pass
+            # Shutdown
+            await self.shutdown()
         
         app = FastAPI(lifespan=lifespan)
         app.include_router(self.router)
@@ -264,8 +360,9 @@ class ThunderboltMaster:
         
         import uvicorn
         api_port = port or (self.port + 1)
-        print(f"Starting ThunderBolt Master on port {api_port} (WebSocket on {self.port})")
+        print(f"[Thunderbolt] Starting ThunderBolt Master on port {api_port} (WebSocket on {self.port})")
         uvicorn.run(self.app, host=host, port=api_port)
+
 
 if __name__ == "__main__":
     master = ThunderboltMaster()
