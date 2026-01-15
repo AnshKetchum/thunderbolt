@@ -1,30 +1,83 @@
-# Thunderbolt: A simple, drop-in distributed micro protocol for implementing remote execution
+# Thunderbolt: Distributed Command Execution for Compute Clusters
 
-Thunderbolt is a fast-prototyped API that can be leveraged for setting up remote execution across a large pool of nodes. In practice, this may be a fundamental building block for tackling problems such as cluster resiliency. 
+Thunderbolt is a lightweight distributed execution framework for running commands across multiple nodes in parallel. Built with FastAPI and WebSockets, it provides a simple master-slave architecture for cluster management, monitoring, and automation.
 
-This project exposes a simple FastAPI routes interface that can be easily tacked on to larger services, and a super simple Python client wrapper that can be used to remotely run commands across large numbers of nodes in parallel. 
+## Features
 
-## Quickstart 
+- **Parallel Execution**: Run commands across multiple nodes simultaneously with aggregated results
+- **Health Monitoring**: Automatic periodic health checks with configurable intervals and failure thresholds
+- **WebSocket Communication**: Persistent bidirectional connections for low-latency command dispatch
+- **Flexible Integration**: Use standalone or embed into existing FastAPI applications
+- **Timeout Management**: Per-command timeout configuration with automatic process termination
+- **Automatic Reconnection**: Slaves reconnect to master on connection loss with exponential backoff
+- **Node Discovery**: Query connected nodes and their health status
+- **Hostname-based Targeting**: Execute commands on specific nodes or all nodes
 
-Here's a short code snippet that should give you an idea of how a client user may access Thunderbolt for remote execution via its Python SDK.
+## Installation
+
+```bash
+git clone https://github.com/AnshKetchum/thunderbolt.git
+cd thunderbolt
+pip install -e .
+```
+
+## Quick Start
+
+### Running the Master
+
+Start the master node using the CLI:
+
+```bash
+thunderbolt-master --port 8000 --api-port 8001
+```
+
+Or programmatically:
 
 ```python
-from thunderbolt import ThunderBoltAPI
+from thunderbolt.master import ThunderboltMaster
 
-# Quick start - run commands across your cluster
-# This assumes you have a thunderbolt master running on port 8000 and serving the API on 8001
-with ThunderBoltAPI(host="localhost", port=8001) as api:
-    # See what's connected
+master = ThunderboltMaster(port=8000)
+master.run(host="0.0.0.0", port=8001)
+```
+
+### Running Slave Nodes
+
+Start slave nodes using the CLI:
+
+```bash
+thunderbolt-slave --master-ip 10.0.0.1 --port 8000 --hostname node-01
+```
+
+Or programmatically:
+
+```python
+from thunderbolt.slave import ThunderboltSlave
+
+slave = ThunderboltSlave(
+    master_ip="10.0.0.1",
+    port=8000,
+    hostname="node-01"
+)
+slave.run()
+```
+
+### Using the Client API
+
+```python
+from thunderbolt.api import ThunderboltAPI
+
+with ThunderboltAPI(host="localhost", port=8001) as api:
+    # List connected nodes
     nodes = api.list_nodes()
-    print(f"📡 {nodes['total']} nodes online")
+    print(f"Connected nodes: {nodes['total']}")
     
-    # Run a command everywhere
+    # Run command on all nodes
     result = api.run_on_all_nodes("nvidia-smi --query-gpu=name --format=csv,noheader")
     for host, res in result['results'].items():
         if res['status'] == 'success':
-            print(f"  ✓ {host}: {res['stdout'].strip()}")
+            print(f"{host}: {res['stdout'].strip()}")
     
-    # Or target specific nodes
+    # Run command on specific nodes
     result = api.run_command(
         command="df -h /workspace",
         nodes=["node-01", "node-02"],
@@ -32,87 +85,18 @@ with ThunderBoltAPI(host="localhost", port=8001) as api:
     )
 ```
 
-## Setup 
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/thunderbolt.git
-cd thunderbolt
-
-# Install the package
-pip install -e .
-```
-
-### Running the Master Node
-
-```python
-from thunderbolt import ThunderBoltMaster
-
-# Standalone mode
-master = ThunderBoltMaster(port=8000)
-master.run()  # API will be available on port 8001
-```
-
-Or integrate into your existing FastAPI app:
-
-```python
-from fastapi import FastAPI
-from thunderbolt import ThunderBoltMaster
-from contextlib import asynccontextmanager
-
-# Create master without its own app
-master = ThunderBoltMaster(port=8000, no_app=True)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Start ThunderBolt background tasks
-    master.start_background_tasks()
-    yield
-
-# Your own FastAPI app
-app = FastAPI(lifespan=lifespan)
-
-# Include ThunderBolt routes
-app.include_router(master.router, prefix="/thunderbolt")
-```
-
-### Running Slave Nodes
-
-```python
-from thunderbolt import ThunderBoltSlave
-
-# Connect to master
-slave = ThunderBoltSlave(
-    master_ip="localhost",
-    port=8000,
-    hostname="node-01"  # Optional, defaults to system hostname
-)
-slave.run()
-```
-
-Or via command line:
-
-```bash
-export MASTER_IP=10.0.0.1
-export PORT=8000
-python -m thunderbolt.slave
-```
-
 ## Architecture
 
-Thunderbolt follows the *master-slave* architecture, with 1 slave node per virtual entity - that's a node, docker container, etc - that you want to manage, and a master node that also exposes a client side REST API "frontend" to serve requests.
-
+Thunderbolt uses a master-slave architecture with WebSocket-based communication:
 Here's a basic diagram of the architecture 
 
 ![Architecture Diagram](./docs/arch-diagram.jpg)
 
-**Key Components:**
+**Components:**
 
-- **Master Node**: Central coordinator that manages slave connections via WebSocket and exposes a REST API for command execution
-- **Slave Nodes**: Worker nodes that maintain persistent WebSocket connections to the master and execute received commands
-- **Client API**: Python SDK providing a simple interface for interacting with the master's REST API
+- **Master Node**: Central coordinator that manages slave connections via WebSocket (port 8000) and exposes a REST API (port 8001) for command execution
+- **Slave Nodes**: Worker nodes that maintain persistent WebSocket connections and execute commands
+- **Client API**: Python SDK for interacting with the master's REST API
 
 **Communication Flow:**
 
@@ -120,35 +104,21 @@ Here's a basic diagram of the architecture
 2. Master performs periodic health checks on all connected slaves
 3. Clients send command execution requests to the master's REST API
 4. Master dispatches commands to target slaves via WebSocket
-5. Slaves execute commands and return results to the master
+5. Slaves execute commands asynchronously and return results
 6. Master aggregates results and returns them to the client
 
-## Features
-
-- **Parallel Execution**: Execute commands across multiple nodes simultaneously with aggregated results
-- **Health Checking**: Automatic periodic health checks (configurable interval, default 10s) with failure thresholds and auto-disconnection
-- **WebSocket Communication**: Persistent bidirectional connections between master and slaves for low-latency command dispatch
-- **Flexible Integration**: Use as standalone service or embed into existing FastAPI applications via router
-- **Timeout Management**: Per-command timeout configuration with automatic process termination on timeout
-- **Sudo Support**: Optional privilege escalation for commands requiring root access
-- **Automatic Reconnection**: Slaves automatically reconnect to master on connection loss
-- **Context Manager Support**: Clean resource management with Python context managers
-- **Command Result Aggregation**: Collect and organize results from multiple nodes with success/failure status
-- **Node Discovery**: Query master for list of connected nodes with health status
-- **Hostname-based Targeting**: Target specific nodes by hostname for selective command execution
-
-## Micro-REST API Reference
+## REST API Reference
 
 ### Base URL
 ```
 http://<master-host>:<api-port>
 ```
 
-Default API port is WebSocket port + 1 (e.g., WebSocket on 8000, API on 8001)
+Default ports: WebSocket on 8000, REST API on 8001
 
 ---
 
-### `GET /`
+### GET /
 
 Get master status information.
 
@@ -162,7 +132,7 @@ Get master status information.
 
 ---
 
-### `GET /health`
+### GET /health
 
 Health check endpoint for the master service.
 
@@ -170,13 +140,13 @@ Health check endpoint for the master service.
 ```json
 {
   "status": "healthy",
-  "slaves": 5
+  "connected_slaves": 5
 }
 ```
 
 ---
 
-### `GET /nodes`
+### GET /nodes
 
 List all connected slave nodes with their health status.
 
@@ -194,29 +164,18 @@ List all connected slave nodes with their health status.
       "hostname": "node-02",
       "last_seen": "2024-01-14T10:30:44.987654",
       "failed_healthchecks": 1
-    },
-    {
-      "hostname": "node-03",
-      "last_seen": "2024-01-14T10:30:46.456789",
-      "failed_healthchecks": 0
     }
   ]
 }
 ```
 
-**Fields:**
-- `total`: Number of connected slaves
-- `hostname`: Unique identifier for the slave node
-- `last_seen`: ISO 8601 timestamp of last successful communication
-- `failed_healthchecks`: Number of consecutive failed health checks
-
 ---
 
-### `POST /run`
+### POST /run
 
 Execute a command on specified nodes.
 
-**Request Body:**
+**Request:**
 ```json
 {
   "command": "df -h /workspace",
@@ -228,9 +187,9 @@ Execute a command on specified nodes.
 
 **Parameters:**
 - `command` (string, required): Shell command to execute
-- `nodes` (array[string], required): List of hostnames to run command on
+- `nodes` (array, required): List of hostnames to target
 - `timeout` (integer, optional): Command timeout in seconds (default: 30)
-- `use_sudo` (boolean, optional): Whether to run with sudo privileges (default: false)
+- `use_sudo` (boolean, optional): Run with sudo privileges (default: false)
 
 **Response:**
 ```json
@@ -261,84 +220,54 @@ Execute a command on specified nodes.
 }
 ```
 
-**Result Fields:**
-- `status`: One of "success", "error", or "timeout"
-- `stdout`: Standard output from the command
-- `stderr`: Standard error from the command
-- `returncode`: Exit code from the command (0 = success, -1 = timeout/error)
-- `hostname`: Node that executed the command
-- `command_id`: Unique identifier for tracking this command execution
+**Status Values:**
+- `success`: Command executed successfully (returncode 0)
+- `error`: Command failed (non-zero returncode)
+- `timeout`: Command exceeded timeout limit
 
 **Error Response (404):**
 ```json
 {
-  "detail": "Nodes not found: ['node-99', 'node-100']"
+  "detail": "Nodes not found: ['node-99']"
 }
 ```
 
----
+## Python Client API
 
-## Python Client API Reference
-
-### ThunderBoltAPI
+### ThunderboltAPI
 
 Main client class for interacting with the Thunderbolt master.
 
 #### Constructor
 
 ```python
-ThunderBoltAPI(host: str = "localhost", port: int = 8001)
+ThunderboltAPI(host: str = "localhost", port: int = 8001, base_path: str = "")
 ```
 
 **Parameters:**
 - `host`: Master API hostname or IP address
-- `port`: Master API port
-
-**Example:**
-```python
-from thunderbolt import ThunderBoltAPI
-
-# Create client
-api = ThunderBoltAPI(host="10.0.0.1", port=8001)
-
-# Or use as context manager
-with ThunderBoltAPI(host="10.0.0.1", port=8001) as api:
-    nodes = api.list_nodes()
-```
+- `port`: Master API port (default: 8001)
+- `base_path`: Base path prefix for API endpoints (e.g., "/thunderbolt")
 
 ---
 
-#### `list_nodes()`
+#### list_nodes()
 
 Get list of all connected nodes.
 
 **Returns:** Dictionary with node information
-
-```python
-{
-    'total': 3,
-    'nodes': [
-        {
-            'hostname': 'node-01',
-            'last_seen': '2024-01-14T10:30:45.123456',
-            'failed_healthchecks': 0
-        },
-        ...
-    ]
-}
-```
 
 **Example:**
 ```python
 nodes = api.list_nodes()
 print(f"Connected nodes: {nodes['total']}")
 for node in nodes['nodes']:
-    print(f"  - {node['hostname']}")
+    print(f"  {node['hostname']} - Failed checks: {node['failed_healthchecks']}")
 ```
 
 ---
 
-#### `run_command(command, nodes, timeout=30, use_sudo=False)`
+#### run_command(command, nodes, timeout=30, use_sudo=False)
 
 Execute a command on specific nodes.
 
@@ -367,7 +296,7 @@ for hostname, res in result['results'].items():
 
 ---
 
-#### `run_on_all_nodes(command, timeout=30, use_sudo=False)`
+#### run_on_all_nodes(command, timeout=30, use_sudo=False)
 
 Execute a command on all connected nodes.
 
@@ -378,6 +307,8 @@ Execute a command on all connected nodes.
 
 **Returns:** Dictionary with command results from all nodes
 
+**Raises:** `ValueError` if no nodes are connected
+
 **Example:**
 ```python
 result = api.run_on_all_nodes("uptime")
@@ -387,22 +318,85 @@ for hostname, res in result['results'].items():
 
 ---
 
-#### `close()`
+#### get_node_hostnames()
 
-Close the HTTP session. Called automatically when using context manager.
+Get list of all connected node hostnames.
+
+**Returns:** List of hostname strings
 
 **Example:**
 ```python
-api = ThunderBoltAPI()
-try:
-    # ... use api ...
-finally:
-    api.close()
+hostnames = api.get_node_hostnames()
+print(f"Available nodes: {', '.join(hostnames)}")
 ```
 
 ---
 
+#### health()
+
+Check master server health.
+
+**Returns:** Dictionary with health status
+
+**Example:**
+```python
+health = api.health()
+print(f"Master status: {health['status']}, Slaves: {health['connected_slaves']}")
+```
+
+---
+
+#### close()
+
+Close the HTTP session. Called automatically when using context manager.
+
 ## Configuration
+
+### Master Configuration
+
+**CLI Options:**
+```bash
+thunderbolt-master --port 8000 \
+                  --api-port 8001 \
+                  --host 0.0.0.0 \
+                  --health-check-interval 10 \
+                  --max-failed-healthchecks 15
+```
+
+**Python API:**
+```python
+from thunderbolt.master import ThunderboltMaster
+
+master = ThunderboltMaster(
+    port=8000,                      # WebSocket port for slave connections
+    health_check_interval=10,       # Seconds between health checks
+    max_failed_healthchecks=15,     # Failed checks before disconnect
+    no_app=False,                   # Set True to use router only
+    routes_prefix="/thunderbolt"    # API route prefix (optional)
+)
+```
+
+### Slave Configuration
+
+**CLI Options:**
+```bash
+thunderbolt-slave --master-ip 10.0.0.1 \
+                 --port 8000 \
+                 --hostname custom-node-name
+```
+
+**Python API:**
+```python
+from thunderbolt.slave import ThunderboltSlave
+
+slave = ThunderboltSlave(
+    master_ip="10.0.0.1",           # Master IP address
+    port=8000,                      # Master WebSocket port
+    hostname="node-01",             # Custom hostname (optional)
+    reconnect_delay=5,              # Initial reconnect delay in seconds
+    reconnect_backoff_max=60        # Max reconnect delay in seconds
+)
+```
 
 ### Environment Variables
 
@@ -413,42 +407,72 @@ finally:
 - `MASTER_IP`: Master node IP address (default: "localhost")
 - `PORT`: Master WebSocket port to connect to (default: 8000)
 
-### Master Configuration
+## Advanced Integration
+
+### Embedding in Existing FastAPI App
+
+You can embed Thunderbolt into your existing FastAPI application:
 
 ```python
-master = ThunderBoltMaster(
-    port=8000,                      # WebSocket port
-    health_check_interval=10,        # Seconds between health checks
-    max_failed_healthchecks=15,      # Failed checks before disconnect
-    no_app=False                     # Set True to use router only
-)
+from fastapi import FastAPI
+from thunderbolt.master import ThunderboltMaster
+from contextlib import asynccontextmanager
+
+# Create master without its own app
+master = ThunderboltMaster(port=8000, no_app=True, routes_prefix="/cluster")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start Thunderbolt background tasks
+    master.start_background_tasks()
+    yield
+    # Shutdown Thunderbolt
+    await master.shutdown()
+
+# Your existing FastAPI app
+app = FastAPI(lifespan=lifespan)
+
+# Include Thunderbolt routes
+app.include_router(master.router)
+
+# Your existing routes
+@app.get("/")
+async def root():
+    return {"message": "My application"}
 ```
 
-### Slave Configuration
-
-```python
-slave = ThunderBoltSlave(
-    master_ip="10.0.0.1",           # Master IP
-    port=8000,                       # Master WebSocket port
-    hostname="custom-node-name"      # Optional custom hostname
-)
-```
-
----
+Now Thunderbolt API will be available at `/cluster/nodes`, `/cluster/run`, etc.
 
 ## Use Cases
 
 - **Cluster Management**: Deploy commands across compute clusters for maintenance and monitoring
-- **Distributed Testing**: Run test suites simultaneously across multiple environments
+- **Distributed Training**: Monitor and manage multi-node machine learning training jobs
 - **Configuration Management**: Update configurations on multiple servers in parallel
 - **Health Monitoring**: Collect system metrics from all nodes periodically
+- **Resource Monitoring**: Query GPU/CPU/memory status across training clusters
 - **Deployment Automation**: Execute deployment scripts across staging/production servers
-- **Resource Monitoring**: Query GPU/CPU/memory status across ML training clusters
+- **Log Collection**: Gather logs from multiple nodes simultaneously
 
----
+## Testing
+
+Thunderbolt includes a comprehensive integration test suite using Docker containers:
+
+```bash
+# Install test dependencies
+pip install -r requirements-test.txt
+
+# Run tests
+pytest tests/test_protocol.py -v -s
+```
+
+The test suite automatically:
+- Spins up Docker containers for master and slave nodes
+- Tests all API endpoints and communication protocols
+- Verifies timeout handling, error cases, and edge conditions
+- Cleans up all resources after tests complete
+
+See `tests/README.md` for detailed testing documentation.
 
 ## License
 
 MIT License
-
----
