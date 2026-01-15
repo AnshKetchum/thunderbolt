@@ -19,7 +19,8 @@ class ThunderboltMaster:
         port: Optional[int] = None,
         health_check_interval: int = 10,
         max_failed_healthchecks: int = 15,
-        no_app: bool = False
+        no_app: bool = False, 
+        routes_prefix=None
     ):
         self.port = port or int(os.getenv("PORT", 8000))
         self.health_check_interval = health_check_interval
@@ -38,6 +39,7 @@ class ThunderboltMaster:
         self.background_tasks: List[asyncio.Task] = []
         self.websocket_server_obj = None
         self._shutdown_event = asyncio.Event()
+        self.routes_prefix = routes_prefix
         
         # Create router
         self.router = self._create_router()
@@ -47,7 +49,13 @@ class ThunderboltMaster:
     
     def _create_router(self) -> APIRouter:
         """Create the FastAPI router with all endpoints."""
-        router = APIRouter()
+
+        router = None
+        if isinstance(self.routes_prefix, str) and self.routes_prefix:
+            router = APIRouter(prefix=self.routes_prefix)
+        else:
+            router = APIRouter()
+        
         
         class CommandRequest(BaseModel):
             command: str
