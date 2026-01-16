@@ -20,7 +20,6 @@ class ThunderboltAPI:
         """
         self.base_path = base_path.rstrip("/")  # Remove trailing slash if present
         self.base_url = f"http://{host}:{port}{self.base_path}"
-        self.session = requests.Session()
     
     def list_nodes(self) -> Dict[str, Any]:
         """
@@ -35,7 +34,7 @@ class ThunderboltAPI:
             requests.exceptions.RequestException: If the request fails
         """
         url = f"{self.base_url}/nodes"
-        response = self.session.get(url)
+        response = requests.get(url)
         response.raise_for_status()
         return response.json()
     
@@ -79,7 +78,7 @@ class ThunderboltAPI:
             "use_sudo": use_sudo
         }
         
-        response = self.session.post(url, json=payload)
+        response = requests.post(url, json=payload)
         response.raise_for_status()
         return response.json()
     
@@ -91,7 +90,7 @@ class ThunderboltAPI:
             Dict with health status and number of connected slaves
         """
         url = f"{self.base_url}/health"
-        response = self.session.get(url)
+        response = requests.get(url)
         response.raise_for_status()
         return response.json()
     
@@ -132,8 +131,8 @@ class ThunderboltAPI:
         return self.run_command(command, hostnames, timeout, use_sudo)
     
     def close(self):
-        """Close the underlying session."""
-        self.session.close()
+        """Close the underlying session (no-op without session)."""
+        pass
     
     def __enter__(self):
         """Context manager entry."""
@@ -142,4 +141,3 @@ class ThunderboltAPI:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
         self.close()
-
