@@ -7,6 +7,8 @@ import os
 from typing import Optional
 import signal
 import sys
+from pathlib import Path
+from datetime import datetime
 
 
 class ThunderboltSlave:
@@ -20,7 +22,9 @@ class ThunderboltSlave:
         api_key: Optional[str] = None,
         hostname: Optional[str] = None,
         reconnect_interval: int = 5,
-        max_reconnect_attempts: int = -1  # -1 for infinite
+        max_reconnect_attempts: int = -1,
+        shared_dir: Optional[str] = None,
+        shared_dir_poll_interval: float = 0.5
     ):
         self.master_host = master_host
         self.command_port = command_port
@@ -29,6 +33,16 @@ class ThunderboltSlave:
         self.hostname = hostname or socket.gethostname()
         self.reconnect_interval = reconnect_interval
         self.max_reconnect_attempts = max_reconnect_attempts
+        
+        # Shared directory configuration
+        self.shared_dir = Path(shared_dir) if shared_dir else None
+        self.shared_dir_poll_interval = shared_dir_poll_interval
+        self.node_dir = None
+        self.jobs_file = None
+        self.processed_jobs = set()  # Track already processed job IDs
+        
+        if self.shared_dir:
+            self._setup_shared_directory()
         
         # WebSocket connections
         self.command_ws: Optional[websockets.WebSocketClientProtocol] = None
@@ -41,7 +55,280 @@ class ThunderboltSlave:
         
         # Task tracking
         self.tasks = []
+    
+    def _setup_shared_directory(self):
+        """Initialize slave's directory in shared storage."""
+        try:
+            # Create node-specific directory
+            self.node_dir = self.shared_dir / self.hostname
+            self.node_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Reference to jobs file
+            self.jobs_file = self.shared_dir / "jobs.json"
+            
+            print(f"[Slave] Shared directory initialized: {self.node_dir}")
+            print(f"[Slave] Watching jobs file: {self.jobs_file}")
+            
+        except Exception as e:
+            print(f"[Slave] Failed to setup shared directory: {e}")
+            raise
+    
+    async def poll_shared_directory(self):
+        """Poll shared directory for new jobs."""
+        if not self.shared_dir or not self.jobs_file:
+            return
         
+        print("[Slave] Starting shared directory polling...")
+        
+        try:
+            while not self._shutdown_event.is_set():
+                try:
+                    # Read jobs file
+                    if not self.jobs_file.exists():
+                        await asyncio.sleep(self.shared_dir_poll_interval)
+                        continue
+                    
+                    with open(self.jobs_file, 'r') as f:
+                        try:
+                            jobs = json.load(f)
+                        except json.JSONDecodeError:
+                            jobs = {}
+                    
+                    # Process each job
+                    for command_id, job_data in jobs.items():
+                        # Skip if already processed
+                        if command_id in self.processed_jobs:
+                            continue
+                        
+                        # Check if this node should execute the job
+                        job_type = job_data.get("type")
+                        
+                        if job_type == "command":
+                            # Simple command for specific nodes
+                            nodes = job_data.get("nodes", [])
+                            if self.hostname not in nodes:
+                                continue
+                            
+                            # Check if we've already completed this job
+                            result_file = self.node_dir / f"{command_id}.json"
+                            if result_file.exists():
+                                self.processed_jobs.add(command_id)
+                                continue
+                            
+                            # Execute command
+                            print(f"[Slave] Processing shared dir job {command_id}")
+                            asyncio.create_task(
+                                self._execute_shared_dir_command(
+                                    command_id,
+                                    job_data.get("command"),
+                                    job_data.get("timeout", 30),
+                                    job_data.get("use_sudo", False)
+                                )
+                            )
+                            
+                            # Mark as processed
+                            self.processed_jobs.add(command_id)
+                        
+                        elif job_type == "batched_command":
+                            # Batched commands - check if this node has commands
+                            node_commands = job_data.get("node_commands", {})
+                            if self.hostname not in node_commands:
+                                continue
+                            
+                            # Check if we've already completed this job
+                            result_file = self.node_dir / f"{command_id}.json"
+                            if result_file.exists():
+                                self.processed_jobs.add(command_id)
+                                continue
+                            
+                            # Execute batched commands for this node
+                            print(f"[Slave] Processing batched shared dir job {command_id}")
+                            asyncio.create_task(
+                                self._execute_shared_dir_batched(
+                                    command_id,
+                                    node_commands[self.hostname]
+                                )
+                            )
+                            
+                            # Mark as processed
+                            self.processed_jobs.add(command_id)
+                    
+                    # Clean up old processed job IDs (keep last 1000)
+                    if len(self.processed_jobs) > 1000:
+                        # Remove oldest entries (keep most recent 500)
+                        current_job_ids = set(jobs.keys())
+                        self.processed_jobs = current_job_ids.union(
+                            list(self.processed_jobs)[-500:]
+                        )
+                    
+                except Exception as e:
+                    print(f"[Slave] Error polling shared directory: {e}")
+                
+                # Wait before next poll
+                await asyncio.sleep(self.shared_dir_poll_interval)
+        
+        except asyncio.CancelledError:
+            print("[Slave] Shared directory polling cancelled")
+            raise
+    
+    async def _execute_shared_dir_command(
+        self,
+        command_id: str,
+        command: str,
+        timeout: int,
+        use_sudo: bool
+    ):
+        """Execute a command from shared directory and write result."""
+        result = {
+            "type": "command_result",
+            "command_id": command_id,
+            "hostname": self.hostname,
+            "command": command,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        try:
+            # Prepare command
+            if use_sudo:
+                full_command = f"sudo {command}"
+            else:
+                full_command = command
+            
+            # Execute with timeout
+            process = await asyncio.create_subprocess_shell(
+                full_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=timeout
+                )
+                
+                result.update({
+                    "success": True,
+                    "exit_code": process.returncode,
+                    "stdout": stdout.decode('utf-8', errors='replace'),
+                    "stderr": stderr.decode('utf-8', errors='replace')
+                })
+                
+            except asyncio.TimeoutError:
+                # Kill the process
+                try:
+                    process.kill()
+                    await process.wait()
+                except:
+                    pass
+                
+                result.update({
+                    "success": False,
+                    "error": f"Command timed out after {timeout}s"
+                })
+        
+        except Exception as e:
+            result.update({
+                "success": False,
+                "error": str(e)
+            })
+        
+        # Write result to node directory
+        try:
+            result_file = self.node_dir / f"{command_id}.json"
+            with open(result_file, 'w') as f:
+                json.dump(result, f, indent=2)
+            print(f"[Slave] Wrote result for job {command_id}")
+        except Exception as e:
+            print(f"[Slave] Failed to write result for job {command_id}: {e}")
+    
+    async def _execute_shared_dir_batched(
+        self,
+        command_id: str,
+        commands: list
+    ):
+        """Execute batched commands from shared directory and write results."""
+        results = {
+            "type": "batched_command_result",
+            "command_id": command_id,
+            "hostname": self.hostname,
+            "timestamp": datetime.now().isoformat(),
+            "commands": []
+        }
+        
+        # Execute each command sequentially
+        for cmd_spec in commands:
+            command = cmd_spec.get("command")
+            timeout = cmd_spec.get("timeout", 30)
+            use_sudo = cmd_spec.get("use_sudo", False)
+            
+            cmd_result = {
+                "command": command
+            }
+            
+            try:
+                # Prepare command
+                if use_sudo:
+                    full_command = f"sudo {command}"
+                else:
+                    full_command = command
+                
+                # Execute with timeout
+                process = await asyncio.create_subprocess_shell(
+                    full_command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(),
+                        timeout=timeout
+                    )
+                    
+                    cmd_result.update({
+                        "result": {
+                            "success": True,
+                            "exit_code": process.returncode,
+                            "stdout": stdout.decode('utf-8', errors='replace'),
+                            "stderr": stderr.decode('utf-8', errors='replace')
+                        }
+                    })
+                    
+                except asyncio.TimeoutError:
+                    # Kill the process
+                    try:
+                        process.kill()
+                        await process.wait()
+                    except:
+                        pass
+                    
+                    cmd_result.update({
+                        "result": {
+                            "success": False,
+                            "error": f"Command timed out after {timeout}s"
+                        }
+                    })
+            
+            except Exception as e:
+                cmd_result.update({
+                    "result": {
+                        "success": False,
+                        "error": str(e)
+                    }
+                })
+            
+            results["commands"].append(cmd_result)
+        
+        # Write results to node directory
+        try:
+            result_file = self.node_dir / f"{command_id}.json"
+            with open(result_file, 'w') as f:
+                json.dump(results, f, indent=2)
+            print(f"[Slave] Wrote batched results for job {command_id}")
+        except Exception as e:
+            print(f"[Slave] Failed to write batched results for job {command_id}: {e}")
+    
     async def connect_command_channel(self):
         """Connect to master's command channel with reconnection logic."""
         attempt = 0
@@ -74,7 +361,7 @@ class ThunderboltSlave:
                     if ack.get("status") == "registered":
                         print(f"[Slave] Command channel registered: {self.hostname}")
                         self._command_connected.set()
-                        attempt = 0  # Reset attempt counter on successful connection
+                        attempt = 0
                         
                         # Handle incoming commands
                         await self.handle_commands(websocket)
@@ -137,7 +424,7 @@ class ThunderboltSlave:
                     if ack.get("status") == "registered":
                         print(f"[Slave] Health channel registered: {self.hostname}")
                         self._health_connected.set()
-                        attempt = 0  # Reset attempt counter on successful connection
+                        attempt = 0
                         
                         # Handle health checks
                         await self.handle_health_checks(websocket)
@@ -289,6 +576,8 @@ class ThunderboltSlave:
         print(f"[Slave] Master: {self.master_host}")
         print(f"[Slave] Command port: {self.command_port}")
         print(f"[Slave] Health port: {self.health_port}")
+        if self.shared_dir:
+            print(f"[Slave] Shared directory: {self.shared_dir}")
         
         # Clear shutdown event
         self._shutdown_event.clear()
@@ -304,6 +593,14 @@ class ThunderboltSlave:
         )
         
         self.tasks = [command_task, health_task]
+        
+        # Add shared directory polling if configured
+        if self.shared_dir:
+            poll_task = asyncio.create_task(
+                self.poll_shared_directory(),
+                name="shared-dir-polling"
+            )
+            self.tasks.append(poll_task)
         
         # Wait for both connections to establish
         try:
@@ -368,4 +665,3 @@ class ThunderboltSlave:
         finally:
             loop.run_until_complete(self.shutdown())
             loop.close()
-

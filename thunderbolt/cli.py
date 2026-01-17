@@ -60,6 +60,24 @@ def master_cli():
         default=None,
         help="Prefix for API routes (e.g., /api/v1)"
     )
+    parser.add_argument(
+        "--shared-dir",
+        type=str,
+        default=None,
+        help="Path to shared directory (NFS mount) for broadcast mode"
+    )
+    parser.add_argument(
+        "--shared-dir-poll-interval",
+        type=float,
+        default=0.5,
+        help="Interval (seconds) for polling shared directory results"
+    )
+    parser.add_argument(
+        "--shared-dir-threshold",
+        type=int,
+        default=10,
+        help="Minimum number of nodes to use shared directory broadcast"
+    )
     
     args = parser.parse_args()
     
@@ -79,6 +97,10 @@ def master_cli():
     print(f"  Max Concurrent Sends:    {args.max_concurrent_sends}")
     if args.routes_prefix:
         print(f"  Routes Prefix:           {args.routes_prefix}")
+    if args.shared_dir:
+        print(f"  Shared Directory:        {args.shared_dir}")
+        print(f"  Shared Dir Poll Interval: {args.shared_dir_poll_interval}s")
+        print(f"  Shared Dir Threshold:    {args.shared_dir_threshold} nodes")
     print("=" * 60)
     print()
     
@@ -88,7 +110,10 @@ def master_cli():
         health_check_interval=args.health_check_interval,
         max_failed_healthchecks=args.max_failed_healthchecks,
         max_concurrent_sends=args.max_concurrent_sends,
-        routes_prefix=args.routes_prefix
+        routes_prefix=args.routes_prefix,
+        shared_dir=args.shared_dir,
+        shared_dir_poll_interval=args.shared_dir_poll_interval,
+        shared_dir_threshold=args.shared_dir_threshold
     )
     
     try:
@@ -149,6 +174,18 @@ def slave_cli():
         default=-1,
         help="Maximum reconnection attempts, -1 for infinite"
     )
+    parser.add_argument(
+        "--shared-dir",
+        type=str,
+        default=None,
+        help="Path to shared directory (NFS mount) for broadcast mode"
+    )
+    parser.add_argument(
+        "--shared-dir-poll-interval",
+        type=float,
+        default=0.5,
+        help="Interval (seconds) for polling shared directory for new jobs"
+    )
     
     args = parser.parse_args()
     
@@ -168,6 +205,9 @@ def slave_cli():
         print(f"  Max Reconnect Attempts:  {args.max_reconnect_attempts}")
     else:
         print(f"  Max Reconnect Attempts:  Infinite")
+    if args.shared_dir:
+        print(f"  Shared Directory:        {args.shared_dir}")
+        print(f"  Shared Dir Poll Interval: {args.shared_dir_poll_interval}s")
     print("=" * 60)
     print()
     
@@ -178,7 +218,9 @@ def slave_cli():
         hostname=args.hostname,
         api_key=api_key,
         reconnect_interval=args.reconnect_interval,
-        max_reconnect_attempts=args.max_reconnect_attempts
+        max_reconnect_attempts=args.max_reconnect_attempts,
+        shared_dir=args.shared_dir,
+        shared_dir_poll_interval=args.shared_dir_poll_interval
     )
     
     try:
