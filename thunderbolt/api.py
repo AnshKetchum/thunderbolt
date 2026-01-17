@@ -50,7 +50,8 @@ class ThunderboltAPI:
         command: str,
         nodes: List[str],
         timeout: int = 30,
-        use_sudo: bool = False
+        use_sudo: bool = False,
+        force_method: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute a command on specified nodes.
@@ -60,6 +61,7 @@ class ThunderboltAPI:
             nodes: List of hostnames to run the command on
             timeout: Command timeout in seconds (default: 30)
             use_sudo: Whether to run with sudo privileges (default: False)
+            force_method: Force execution method - "shared_dir" or "websocket" (default: None for auto)
         
         Returns:
             Dict containing:
@@ -90,11 +92,18 @@ class ThunderboltAPI:
             "use_sudo": use_sudo
         }
         
+        if force_method is not None:
+            payload["force_method"] = force_method
+        
         response = self.session.post(url, json=payload)
         response.raise_for_status()
         return response.json()
-    
-    def run_batched_commands(self, commands: List[Dict[str, Any]]) -> Dict[str, Any]:
+
+    def run_batched_commands(
+        self,
+        commands: List[Dict[str, Any]],
+        force_method: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Execute different commands on different nodes in a batched manner.
         Commands are grouped by node and executed sequentially per node,
@@ -106,6 +115,7 @@ class ThunderboltAPI:
                 - command: str (shell command to execute)
                 - timeout: int (optional, default 30)
                 - use_sudo: bool (optional, default False)
+            force_method: Force execution method - "shared_dir" or "websocket" (default: None for auto)
         
         Returns:
             Dict containing:
@@ -125,7 +135,7 @@ class ThunderboltAPI:
                 {"node": "node1", "command": "echo world", "timeout": 10},
                 {"node": "node2", "command": "uptime", "use_sudo": False}
             ]
-            result = api.run_batched_commands(commands)
+            result = api.run_batched_commands(commands, force_method="websocket")
         
         Raises:
             requests.exceptions.RequestException: If the request fails
@@ -133,10 +143,47 @@ class ThunderboltAPI:
         url = f"{self.base_url}/run_batched"
         payload = {"commands": commands}
         
+        if force_method is not None:
+            payload["force_method"] = force_method
+        
         response = self.session.post(url, json=payload)
         response.raise_for_status()
         return response.json()
-    
+
+    def run_on_all_nodes(
+        self,
+        command: str,
+        timeout: int = 30,
+        use_sudo: bool = False,
+        require_fully_connected: bool = True,
+        force_method: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Execute a command on all connected nodes.
+        
+        Args:
+            command: Shell command to execute
+            timeout: Command timeout in seconds (default: 30)
+            use_sudo: Whether to run with sudo privileges (default: False)
+            require_fully_connected: Only run on nodes with both channels connected (default: True)
+            force_method: Force execution method - "shared_dir" or "websocket" (default: None for auto)
+        
+        Returns:
+            Same format as run_command()
+        
+        Raises:
+            ValueError: If no nodes are connected
+        """
+        if require_fully_connected:
+            hostnames = self.get_fully_connected_nodes()
+        else:
+            hostnames = self.get_node_hostnames()
+            
+        if not hostnames:
+            raise ValueError("No nodes are connected")
+        
+        return self.run_command(command, hostnames, timeout, use_sudo, force_method)
+
     def health(self) -> Dict[str, Any]:
         """
         Check master server health.
