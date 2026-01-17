@@ -80,6 +80,9 @@ class ThunderboltMaster:
             timeout: Optional[int] = 30
             use_sudo: Optional[bool] = False
         
+        class BatchedCommandRequest(BaseModel):
+            commands: List[Dict]  # List of {node: str, command: str, timeout: int, use_sudo: bool}
+        
         @router.post("/run")
         async def run_command(request: CommandRequest):
             """Execute a command on specified nodes in parallel."""
@@ -155,6 +158,138 @@ class ThunderboltMaster:
                 "responses_received": received,
                 "failed_sends": failed_sends,
                 "results": results
+            }
+        
+        @router.post("/run_batched")
+        async def run_batched_commands(request: BatchedCommandRequest):
+            """
+            Execute different commands on different nodes in parallel.
+            Groups commands by node and executes them sequentially per node,
+            but all nodes run in parallel.
+            """
+            if not request.commands:
+                return {
+                    "total_commands": 0,
+                    "total_nodes": 0,
+                    "results": {}
+                }
+            
+            # Organize commands by node
+            node_queues = {}
+            for cmd_spec in request.commands:
+                node = cmd_spec.get("node")
+                command = cmd_spec.get("command")
+                timeout = cmd_spec.get("timeout", 30)
+                use_sudo = cmd_spec.get("use_sudo", False)
+                
+                if not node or not command:
+                    continue
+                    
+                if node not in node_queues:
+                    node_queues[node] = []
+                
+                node_queues[node].append({
+                    "command": command,
+                    "timeout": timeout,
+                    "use_sudo": use_sudo
+                })
+            
+            # Validate all nodes exist
+            invalid_nodes = [node for node in node_queues.keys() if node not in self.slaves]
+            if invalid_nodes:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Nodes not found: {invalid_nodes}"
+                )
+            
+            async def execute_node_queue(hostname: str, commands: List[dict]):
+                """Execute a queue of commands for a single node sequentially."""
+                node_results = []
+                slave_info = self.slaves.get(hostname)
+                
+                if not slave_info or not slave_info.get("command_ws"):
+                    return [(cmd["command"], {
+                        "success": False,
+                        "error": f"Node {hostname} not connected"
+                    }) for cmd in commands]
+                
+                for cmd_spec in commands:
+                    command_id = str(uuid.uuid4())
+                    
+                    # Setup pending command tracking
+                    self.pending_commands[command_id] = {
+                        "responses": {},
+                        "total_nodes": 1,
+                        "received": 0,
+                        "event": asyncio.Event()
+                    }
+                    
+                    # Send command
+                    command_msg = json.dumps({
+                        "type": "command",
+                        "command_id": command_id,
+                        "command": cmd_spec["command"],
+                        "timeout": cmd_spec["timeout"],
+                        "use_sudo": cmd_spec["use_sudo"]
+                    })
+                    
+                    try:
+                        async with self._send_semaphore:
+                            await slave_info["command_ws"].send(command_msg)
+                        
+                        # Wait for response
+                        await asyncio.wait_for(
+                            self.pending_commands[command_id]["event"].wait(),
+                            timeout=cmd_spec["timeout"] + 5
+                        )
+                        
+                        # Get result
+                        result = self.pending_commands[command_id]["responses"].get(
+                            hostname,
+                            {"success": False, "error": "No response received"}
+                        )
+                        
+                    except asyncio.TimeoutError:
+                        result = {"success": False, "error": "Command timeout"}
+                    except Exception as e:
+                        result = {"success": False, "error": f"Send failed: {str(e)}"}
+                    finally:
+                        # Cleanup
+                        if command_id in self.pending_commands:
+                            del self.pending_commands[command_id]
+                    
+                    node_results.append((cmd_spec["command"], result))
+                
+                return node_results
+            
+            # Execute all node queues in parallel
+            tasks = [
+                execute_node_queue(hostname, commands)
+                for hostname, commands in node_queues.items()
+            ]
+            
+            results_by_node = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Format results
+            formatted_results = {}
+            for hostname, results in zip(node_queues.keys(), results_by_node):
+                if isinstance(results, Exception):
+                    formatted_results[hostname] = {
+                        "error": f"Node execution failed: {str(results)}",
+                        "commands": []
+                    }
+                else:
+                    formatted_results[hostname] = {
+                        "commands": [
+                            {"command": cmd, "result": result}
+                            for cmd, result in results
+                        ]
+                    }
+            
+            return {
+                "total_commands": len(request.commands),
+                "total_nodes": len(node_queues),
+                "results": formatted_results
             }
         
         @router.get("/nodes")

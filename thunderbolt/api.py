@@ -20,6 +20,7 @@ class ThunderboltAPI:
         """
         self.base_path = base_path.rstrip("/")  # Remove trailing slash if present
         self.base_url = f"http://{host}:{port}{self.base_path}"
+        self.session = requests.Session()
     
     def list_nodes(self) -> Dict[str, Any]:
         """
@@ -40,7 +41,7 @@ class ThunderboltAPI:
             requests.exceptions.RequestException: If the request fails
         """
         url = f"{self.base_url}/nodes"
-        response = requests.get(url)
+        response = self.session.get(url)
         response.raise_for_status()
         return response.json()
     
@@ -89,7 +90,50 @@ class ThunderboltAPI:
             "use_sudo": use_sudo
         }
         
-        response = requests.post(url, json=payload)
+        response = self.session.post(url, json=payload)
+        response.raise_for_status()
+        return response.json()
+    
+    def run_batched_commands(self, commands: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Execute different commands on different nodes in a batched manner.
+        Commands are grouped by node and executed sequentially per node,
+        but all nodes run in parallel.
+        
+        Args:
+            commands: List of command specifications, each containing:
+                - node: str (hostname)
+                - command: str (shell command to execute)
+                - timeout: int (optional, default 30)
+                - use_sudo: bool (optional, default False)
+        
+        Returns:
+            Dict containing:
+                - total_commands: Total number of commands
+                - total_nodes: Number of unique nodes
+                - results: Dict mapping hostname to result dict
+                    Each result contains:
+                        - commands: List of command results (if successful)
+                            Each command result has:
+                                - command: The executed command string
+                                - result: Dict with success, exit_code, stdout, stderr, or error
+                        - error: Error message (if node-level failure)
+        
+        Example:
+            commands = [
+                {"node": "node1", "command": "echo hello", "timeout": 10},
+                {"node": "node1", "command": "echo world", "timeout": 10},
+                {"node": "node2", "command": "uptime", "use_sudo": False}
+            ]
+            result = api.run_batched_commands(commands)
+        
+        Raises:
+            requests.exceptions.RequestException: If the request fails
+        """
+        url = f"{self.base_url}/run_batched"
+        payload = {"commands": commands}
+        
+        response = self.session.post(url, json=payload)
         response.raise_for_status()
         return response.json()
     
@@ -104,7 +148,7 @@ class ThunderboltAPI:
                 - pending_commands: Number of commands awaiting responses
         """
         url = f"{self.base_url}/health"
-        response = requests.get(url)
+        response = self.session.get(url)
         response.raise_for_status()
         return response.json()
     
@@ -120,7 +164,7 @@ class ThunderboltAPI:
                 - health_check_port: Health check WebSocket port
         """
         url = f"{self.base_url}/"
-        response = requests.get(url)
+        response = self.session.get(url)
         response.raise_for_status()
         return response.json()
     
@@ -220,9 +264,58 @@ class ThunderboltAPI:
             'success_rate': (successful / total * 100) if total > 0 else 0.0
         }
     
+    def get_batched_summary(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generate a summary of batched command execution results.
+        
+        Args:
+            result: Result dict from run_batched_commands()
+        
+        Returns:
+            Dict containing:
+                - total_commands: Total number of commands executed
+                - total_nodes: Number of nodes involved
+                - successful_commands: Number of successful command executions
+                - failed_commands: Number of failed command executions
+                - node_failures: Number of nodes with node-level errors
+                - success_rate: Percentage of successful command executions
+        """
+        total_commands = result['total_commands']
+        total_nodes = result['total_nodes']
+        
+        successful_commands = 0
+        failed_commands = 0
+        node_failures = 0
+        
+        for hostname, node_result in result['results'].items():
+            if 'error' in node_result:
+                # Node-level failure
+                node_failures += 1
+                # Count all commands for this node as failed
+                failed_commands += len([
+                    cmd for cmd in result.get('commands', [])
+                    if cmd.get('node') == hostname
+                ])
+            else:
+                # Process individual command results
+                for cmd_result in node_result.get('commands', []):
+                    if cmd_result['result'].get('success'):
+                        successful_commands += 1
+                    else:
+                        failed_commands += 1
+        
+        return {
+            'total_commands': total_commands,
+            'total_nodes': total_nodes,
+            'successful_commands': successful_commands,
+            'failed_commands': failed_commands,
+            'node_failures': node_failures,
+            'success_rate': (successful_commands / total_commands * 100) if total_commands > 0 else 0.0
+        }
+    
     def close(self):
-        """Close the underlying session (no-op without session)."""
-        pass
+        """Close the underlying session."""
+        self.session.close()
     
     def __enter__(self):
         """Context manager entry."""
