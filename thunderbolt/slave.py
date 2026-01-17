@@ -4,14 +4,14 @@ import socket
 from pathlib import Path
 from typing import Optional
 
-from thunderbolt.slave_utils.command_channel import CommandChannel
-from thunderbolt.slave_utils.health_channel import HealthChannel
-from thunderbolt.slave_utils.command_executor import CommandExecutor
-from thunderbolt.slave_utils.batch_executor import BatchExecutor
-from thunderbolt.slave_utils.directory_manager import DirectoryManager
-from thunderbolt.slave_utils.result_writer import ResultWriter
-from thunderbolt.slave_utils.job_poller import JobPoller
-from thunderbolt.slave_utils.signal_handler import SignalHandler
+from .slave_utils.command_channel import CommandChannel
+from .slave_utils.health_channel import HealthChannel
+from .slave_utils.command_executor import CommandExecutor
+from .slave_utils.batch_executor import BatchExecutor
+from .slave_utils.directory_manager import DirectoryManager
+from .slave_utils.result_writer import ResultWriter
+from .slave_utils.job_poller import JobPoller
+from .slave_utils.signal_handler import SignalHandler
 
 
 class ThunderboltSlave:

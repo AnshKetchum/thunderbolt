@@ -8,10 +8,10 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from thunderbolt.master_utils.routes import create_router
-from thunderbolt.master_utils.websocket_handlers import WebSocketHandlers
-from thunderbolt.master_utils.execution.websocket_executor import WebSocketExecutor
-from thunderbolt.master_utils.execution.shared_dir_executor import SharedDirExecutor
+from .master_utils.routes import create_router
+from .master_utils.websocket_handlers import WebSocketHandlers
+from .master_utils.execution.websocket_executor import WebSocketExecutor
+from .master_utils.execution.shared_dir_executor import SharedDirExecutor
 
 
 class ThunderboltMaster:
