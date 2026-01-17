@@ -24,7 +24,7 @@ class ThunderboltMaster:
         max_failed_healthchecks: int = 15,
         no_app: bool = False, 
         routes_prefix=None,
-        max_concurrent_sends: int = 200,
+        max_concurrent_sends: int = 2048,
         shared_dir: Optional[str] = None,
         shared_dir_poll_interval: float = 0.5,
         shared_dir_threshold: int = 10  # Use shared dir when >= this many nodes
