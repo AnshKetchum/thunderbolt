@@ -173,28 +173,28 @@ class ThunderboltMaster:
             await asyncio.sleep(self.shared_dir_poll_interval)
         
         # Cleanup: remove job from jobs.json
-        try:
-            jobs = {}
-            if self.jobs_file.exists():
-                with open(self.jobs_file, 'r') as f:
-                    jobs = json.load(f)
+        # try:
+        #     jobs = {}
+        #     if self.jobs_file.exists():
+        #         with open(self.jobs_file, 'r') as f:
+        #             jobs = json.load(f)
             
-            if command_id in jobs:
-                del jobs[command_id]
-                temp_file = self.jobs_file.with_suffix('.tmp')
-                with open(temp_file, 'w') as f:
-                    json.dump(jobs, f, indent=2)
-                temp_file.replace(self.jobs_file)
+        #     if command_id in jobs:
+        #         del jobs[command_id]
+        #         temp_file = self.jobs_file.with_suffix('.tmp')
+        #         with open(temp_file, 'w') as f:
+        #             json.dump(jobs, f, indent=2)
+        #         temp_file.replace(self.jobs_file)
             
-            # Optionally cleanup result files
-            for hostname in nodes:
-                node_dir = self.shared_dir / hostname
-                result_file = node_dir / f"{command_id}.json"
-                if result_file.exists():
-                    result_file.unlink()
+        #     # Optionally cleanup result files
+        #     for hostname in nodes:
+        #         node_dir = self.shared_dir / hostname
+        #         result_file = node_dir / f"{command_id}.json"
+        #         if result_file.exists():
+        #             result_file.unlink()
                     
-        except Exception as e:
-            print(f"[Thunderbolt] Error cleaning up job {command_id}: {e}")
+        # except Exception as e:
+        #     print(f"[Thunderbolt] Error cleaning up job {command_id}: {e}")
         
         return {
             "command": command,
