@@ -31,7 +31,7 @@ jobs:
     
     - name: Run pytest
       run: |
-        pytest tests/test_protocol.py -v -s --timeout=180 --tb=short
+        pytest tests/ -v -s --timeout=180 --tb=short
       env:
         PYTHONUNBUFFERED: 1
     
