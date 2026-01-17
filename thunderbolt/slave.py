@@ -1,12 +1,12 @@
 import asyncio
 import websockets
 import json
-import os
-import secrets
-import socket
 import subprocess
-import signal
+import socket
+import os
 from typing import Optional
+import signal
+import sys
 
 
 class ThunderboltSlave:
@@ -14,78 +14,50 @@ class ThunderboltSlave:
     
     def __init__(
         self,
-        master_ip: Optional[str] = None,
-        port: Optional[int] = None,
+        master_host: str,
+        command_port: int = 8000,
+        health_port: int = 8100,
+        api_key: Optional[str] = None,
         hostname: Optional[str] = None,
-        reconnect_delay: int = 5,
-        reconnect_backoff_max: int = 60
+        reconnect_interval: int = 5,
+        max_reconnect_attempts: int = -1  # -1 for infinite
     ):
-        self.master_ip = master_ip or os.getenv("MASTER_IP", "localhost")
-        self.port = port or int(os.getenv("PORT", 8000))
+        self.master_host = master_host
+        self.command_port = command_port
+        self.health_port = health_port
+        self.api_key = api_key or os.getenv("THUNDERBOLT_API_KEY", "default-key")
         self.hostname = hostname or socket.gethostname()
-        self.api_key = secrets.token_urlsafe(32)
-        self.reconnect_delay = reconnect_delay
-        self.reconnect_backoff_max = reconnect_backoff_max
-        self._shutdown_event = asyncio.Event()
-        self._current_reconnect_delay = reconnect_delay
+        self.reconnect_interval = reconnect_interval
+        self.max_reconnect_attempts = max_reconnect_attempts
         
-    async def execute_command(self, command: str, timeout: int, use_sudo: bool):
-        """Execute a command and return the result."""
-        try:
-            cmd = f"sudo {command}" if use_sudo else command
-            
-            process = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=os.environ.copy()
-            )
-            
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=timeout
-                )
-                
-                return {
-                    "stdout": stdout.decode('utf-8', errors='replace'),
-                    "stderr": stderr.decode('utf-8', errors='replace'),
-                    "returncode": process.returncode,
-                    "status": "success" if process.returncode == 0 else "error"
-                }
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                return {
-                    "stdout": "",
-                    "stderr": f"Command timed out after {timeout} seconds",
-                    "returncode": -1,
-                    "status": "timeout"
-                }
-        except Exception as e:
-            return {
-                "stdout": "",
-                "stderr": f"Error executing command: {str(e)}",
-                "returncode": -1,
-                "status": "error"
-            }
-    
-    async def connect_to_master(self):
-        """Connect to master and handle commands with exponential backoff."""
-        uri = f"ws://{self.master_ip}:{self.port}"
+        # WebSocket connections
+        self.command_ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.health_ws: Optional[websockets.WebSocketClientProtocol] = None
+        
+        # Control flags
+        self._shutdown_event = asyncio.Event()
+        self._command_connected = asyncio.Event()
+        self._health_connected = asyncio.Event()
+        
+        # Task tracking
+        self.tasks = []
+        
+    async def connect_command_channel(self):
+        """Connect to master's command channel with reconnection logic."""
+        attempt = 0
         
         while not self._shutdown_event.is_set():
-            try:
-                print(f"[Slave] Connecting to master at {uri}...")
+            if self.max_reconnect_attempts > 0 and attempt >= self.max_reconnect_attempts:
+                print(f"[Slave] Max reconnection attempts ({self.max_reconnect_attempts}) reached for command channel")
+                break
                 
-                async with websockets.connect(
-                    uri,
-                    ping_interval=20,
-                    ping_timeout=10,
-                    close_timeout=5
-                ) as websocket:
-                    # Reset reconnect delay on successful connection
-                    self._current_reconnect_delay = self.reconnect_delay
+            try:
+                attempt += 1
+                uri = f"ws://{self.master_host}:{self.command_port}"
+                print(f"[Slave] Connecting to command channel: {uri} (attempt {attempt})")
+                
+                async with websockets.connect(uri, ping_interval=30, ping_timeout=10) as websocket:
+                    self.command_ws = websocket
                     
                     # Register with master
                     registration = {
@@ -94,155 +66,306 @@ class ThunderboltSlave:
                         "api_key": self.api_key
                     }
                     await websocket.send(json.dumps(registration))
-                    print(f"[Slave] Sent registration: {self.hostname}")
                     
-                    # Wait for acknowledgment with timeout
-                    try:
-                        ack = await asyncio.wait_for(websocket.recv(), timeout=10)
-                        ack_data = json.loads(ack)
-                        print(f"[Slave] Received from master: {ack_data}")
+                    # Wait for acknowledgment
+                    ack_msg = await websocket.recv()
+                    ack = json.loads(ack_msg)
+                    
+                    if ack.get("status") == "registered":
+                        print(f"[Slave] Command channel registered: {self.hostname}")
+                        self._command_connected.set()
+                        attempt = 0  # Reset attempt counter on successful connection
                         
-                        if ack_data.get("status") != "registered":
-                            print(f"[Slave] Registration failed: {ack_data}")
-                            await asyncio.sleep(self._current_reconnect_delay)
-                            continue
-                        
-                        print(f"[Slave] Successfully registered with master!")
-                    except asyncio.TimeoutError:
-                        print("[Slave] Registration timeout - no response from master")
-                        continue
-                    
-                    # Main loop: handle commands and health checks
-                    try:
-                        async for message in websocket:
-                            if self._shutdown_event.is_set():
-                                break
-                                
-                            try:
-                                data = json.loads(message)
-                                
-                                if data.get("type") == "healthcheck":
-                                    # Respond to health check
-                                    await websocket.send(json.dumps({
-                                        "type": "healthcheck_response",
-                                        "hostname": self.hostname,
-                                        "status": "healthy"
-                                    }))
-                                
-                                elif data.get("type") == "command":
-                                    # Execute command in background to not block health checks
-                                    asyncio.create_task(
-                                        self._handle_command(websocket, data)
-                                    )
-                            
-                            except json.JSONDecodeError as e:
-                                print(f"[Slave] Failed to parse message: {e}")
-                            except Exception as e:
-                                print(f"[Slave] Error processing message: {e}")
-                    
-                    except websockets.exceptions.ConnectionClosed:
-                        print("[Slave] Connection to master closed")
-            
-            except websockets.exceptions.WebSocketException as e:
-                print(f"[Slave] WebSocket error: {e}")
-            except OSError as e:
-                print(f"[Slave] Network error: {e}")
+                        # Handle incoming commands
+                        await self.handle_commands(websocket)
+                    else:
+                        print(f"[Slave] Registration failed: {ack.get('message')}")
+                
+            except websockets.exceptions.ConnectionClosed:
+                print("[Slave] Command channel connection closed")
+                self._command_connected.clear()
+            except asyncio.CancelledError:
+                print("[Slave] Command channel connection cancelled")
+                self._command_connected.clear()
+                raise
             except Exception as e:
-                print(f"[Slave] Unexpected error: {e}")
+                print(f"[Slave] Command channel error: {e}")
+                self._command_connected.clear()
+            finally:
+                self.command_ws = None
             
+            # Wait before reconnecting
             if not self._shutdown_event.is_set():
-                print(f"[Slave] Reconnecting in {self._current_reconnect_delay}s...")
+                print(f"[Slave] Reconnecting command channel in {self.reconnect_interval}s...")
                 try:
                     await asyncio.wait_for(
                         self._shutdown_event.wait(),
-                        timeout=self._current_reconnect_delay
+                        timeout=self.reconnect_interval
                     )
                 except asyncio.TimeoutError:
                     pass
+    
+    async def connect_health_channel(self):
+        """Connect to master's health check channel with reconnection logic."""
+        attempt = 0
+        
+        while not self._shutdown_event.is_set():
+            if self.max_reconnect_attempts > 0 and attempt >= self.max_reconnect_attempts:
+                print(f"[Slave] Max reconnection attempts ({self.max_reconnect_attempts}) reached for health channel")
+                break
                 
-                # Exponential backoff
-                self._current_reconnect_delay = min(
-                    self._current_reconnect_delay * 2,
-                    self.reconnect_backoff_max
+            try:
+                attempt += 1
+                uri = f"ws://{self.master_host}:{self.health_port}"
+                print(f"[Slave] Connecting to health channel: {uri} (attempt {attempt})")
+                
+                async with websockets.connect(uri, ping_interval=20, ping_timeout=10) as websocket:
+                    self.health_ws = websocket
+                    
+                    # Register with master
+                    registration = {
+                        "type": "register",
+                        "hostname": self.hostname,
+                        "api_key": self.api_key
+                    }
+                    await websocket.send(json.dumps(registration))
+                    
+                    # Wait for acknowledgment
+                    ack_msg = await websocket.recv()
+                    ack = json.loads(ack_msg)
+                    
+                    if ack.get("status") == "registered":
+                        print(f"[Slave] Health channel registered: {self.hostname}")
+                        self._health_connected.set()
+                        attempt = 0  # Reset attempt counter on successful connection
+                        
+                        # Handle health checks
+                        await self.handle_health_checks(websocket)
+                    else:
+                        print(f"[Slave] Health registration failed: {ack.get('message')}")
+                
+            except websockets.exceptions.ConnectionClosed:
+                print("[Slave] Health channel connection closed")
+                self._health_connected.clear()
+            except asyncio.CancelledError:
+                print("[Slave] Health channel connection cancelled")
+                self._health_connected.clear()
+                raise
+            except Exception as e:
+                print(f"[Slave] Health channel error: {e}")
+                self._health_connected.clear()
+            finally:
+                self.health_ws = None
+            
+            # Wait before reconnecting
+            if not self._shutdown_event.is_set():
+                print(f"[Slave] Reconnecting health channel in {self.reconnect_interval}s...")
+                try:
+                    await asyncio.wait_for(
+                        self._shutdown_event.wait(),
+                        timeout=self.reconnect_interval
+                    )
+                except asyncio.TimeoutError:
+                    pass
+    
+    async def handle_commands(self, websocket):
+        """Handle incoming commands from master."""
+        try:
+            async for message in websocket:
+                data = json.loads(message)
+                
+                if data.get("type") == "command":
+                    # Execute command asynchronously
+                    asyncio.create_task(
+                        self.execute_command(
+                            websocket,
+                            data.get("command_id"),
+                            data.get("command"),
+                            data.get("timeout", 30),
+                            data.get("use_sudo", False)
+                        )
+                    )
+        
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[Slave] Error handling commands: {e}")
+    
+    async def handle_health_checks(self, websocket):
+        """Handle incoming health checks from master."""
+        try:
+            async for message in websocket:
+                data = json.loads(message)
+                
+                if data.get("type") == "healthcheck":
+                    # Respond immediately
+                    response = {
+                        "type": "healthcheck_response",
+                        "hostname": self.hostname,
+                        "status": "healthy"
+                    }
+                    await websocket.send(json.dumps(response))
+        
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[Slave] Error handling health checks: {e}")
+    
+    async def execute_command(
+        self,
+        websocket,
+        command_id: str,
+        command: str,
+        timeout: int,
+        use_sudo: bool
+    ):
+        """Execute a command and send result back to master."""
+        result = {
+            "type": "command_result",
+            "command_id": command_id,
+            "hostname": self.hostname,
+            "command": command
+        }
+        
+        try:
+            # Prepare command
+            if use_sudo:
+                full_command = f"sudo {command}"
+            else:
+                full_command = command
+            
+            # Execute with timeout
+            process = await asyncio.create_subprocess_shell(
+                full_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=timeout
                 )
+                
+                result.update({
+                    "success": True,
+                    "exit_code": process.returncode,
+                    "stdout": stdout.decode('utf-8', errors='replace'),
+                    "stderr": stderr.decode('utf-8', errors='replace')
+                })
+                
+            except asyncio.TimeoutError:
+                # Kill the process
+                try:
+                    process.kill()
+                    await process.wait()
+                except:
+                    pass
+                
+                result.update({
+                    "success": False,
+                    "error": f"Command timed out after {timeout}s"
+                })
+        
+        except Exception as e:
+            result.update({
+                "success": False,
+                "error": str(e)
+            })
+        
+        # Send result back to master
+        try:
+            await websocket.send(json.dumps(result))
+        except Exception as e:
+            print(f"[Slave] Failed to send command result: {e}")
+    
+    async def start(self):
+        """Start the slave and connect to master."""
+        print(f"[Slave] Starting slave: {self.hostname}")
+        print(f"[Slave] Master: {self.master_host}")
+        print(f"[Slave] Command port: {self.command_port}")
+        print(f"[Slave] Health port: {self.health_port}")
+        
+        # Clear shutdown event
+        self._shutdown_event.clear()
+        
+        # Create connection tasks
+        command_task = asyncio.create_task(
+            self.connect_command_channel(),
+            name="command-channel"
+        )
+        health_task = asyncio.create_task(
+            self.connect_health_channel(),
+            name="health-channel"
+        )
+        
+        self.tasks = [command_task, health_task]
+        
+        # Wait for both connections to establish
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    self._command_connected.wait(),
+                    self._health_connected.wait()
+                ),
+                timeout=30
+            )
+            print("[Slave] Both channels connected successfully")
+        except asyncio.TimeoutError:
+            print("[Slave] Warning: Failed to establish all connections within 30s")
+        
+        # Wait for shutdown
+        await self._shutdown_event.wait()
+    
+    async def shutdown(self):
+        """Gracefully shutdown the slave."""
+        print("[Slave] Initiating shutdown...")
+        
+        # Signal shutdown
+        self._shutdown_event.set()
+        
+        # Close connections
+        close_tasks = []
+        if self.command_ws:
+            close_tasks.append(self.command_ws.close())
+        if self.health_ws:
+            close_tasks.append(self.health_ws.close())
+        
+        if close_tasks:
+            await asyncio.gather(*close_tasks, return_exceptions=True)
+        
+        # Cancel all tasks
+        for task in self.tasks:
+            if not task.done():
+                task.cancel()
+        
+        if self.tasks:
+            await asyncio.gather(*self.tasks, return_exceptions=True)
         
         print("[Slave] Shutdown complete")
     
-    async def _handle_command(self, websocket, data):
-        """Handle command execution and send result back to master."""
-        try:
-            # Execute command
-            result = await self.execute_command(
-                data["command"],
-                data.get("timeout", 30),
-                data.get("use_sudo", False)
-            )
-            result["type"] = "command_result"
-            result["hostname"] = self.hostname
-            result["command_id"] = data.get("command_id")
-            
-            await websocket.send(json.dumps(result))
-            
-            # Log with truncated command for readability
-            cmd_preview = data['command'][:50] + ('...' if len(data['command']) > 50 else '')
-            status = result['status']
-            print(f"[Slave] Executed command: {cmd_preview} [status: {status}]")
-            
-        except Exception as e:
-            print(f"[Slave] Error handling command: {e}")
-            # Try to send error result
-            try:
-                error_result = {
-                    "type": "command_result",
-                    "hostname": self.hostname,
-                    "command_id": data.get("command_id"),
-                    "stdout": "",
-                    "stderr": f"Internal error: {str(e)}",
-                    "returncode": -1,
-                    "status": "error"
-                }
-                await websocket.send(json.dumps(error_result))
-            except:
-                pass
-    
-    def _setup_signal_handlers(self):
-        """Setup signal handlers for graceful shutdown."""
-        def signal_handler(signum, frame):
-            print(f"\n[Slave] Received signal {signum}, initiating shutdown...")
-            self._shutdown_event.set()
+    def run(self):
+        """Run the slave with signal handling."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Signal handlers
+        def signal_handler(sig, frame):
+            print(f"\n[Slave] Received signal {sig}")
+            loop.create_task(self.shutdown())
         
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
-    
-    async def run_async(self):
-        """Async entry point for the slave node."""
-        print(f"[Slave] Starting slave node: {self.hostname}")
-        print(f"[Slave] Master: {self.master_ip}:{self.port}")
-        print(f"[Slave] Generated API key: {self.api_key[:16]}...")
         
         try:
-            await self.connect_to_master()
-        except asyncio.CancelledError:
-            print("[Slave] Run task cancelled")
-            raise
-        except Exception as e:
-            print(f"[Slave] Fatal error: {e}")
-            raise
-    
-    def run(self):
-        """Start the slave node."""
-        # Setup signal handlers
-        self._setup_signal_handlers()
-        
-        try:
-            asyncio.run(self.run_async())
+            loop.run_until_complete(self.start())
         except KeyboardInterrupt:
             print("\n[Slave] Keyboard interrupt received")
-        except Exception as e:
-            print(f"[Slave] Fatal error: {e}")
-            raise
+        finally:
+            loop.run_until_complete(self.shutdown())
+            loop.close()
 
-
-if __name__ == "__main__":
-    slave = ThunderboltSlave()
-    slave.run()

@@ -5,7 +5,7 @@ import websockets
 from websockets.server import serve
 import json
 import uuid
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 from datetime import datetime
 import os
 from contextlib import asynccontextmanager
@@ -17,29 +17,46 @@ class ThunderboltMaster:
     def __init__(
         self,
         port: Optional[int] = None,
+        health_check_port: Optional[int] = None,
         health_check_interval: int = 10,
         max_failed_healthchecks: int = 15,
         no_app: bool = False, 
-        routes_prefix=None
+        routes_prefix=None,
+        max_concurrent_sends: int = 200  # Rate limiting for sends
     ):
         self.port = port or int(os.getenv("PORT", 8000))
+        self.health_check_port = health_check_port or (self.port + 100)
         self.health_check_interval = health_check_interval
         self.max_failed_healthchecks = max_failed_healthchecks
         self.no_app = no_app
+        self.max_concurrent_sends = max_concurrent_sends
         
-        # Store connected slaves
+        # Store connected slaves - split command and health check connections
         self.slaves: Dict[str, dict] = {}
-        # hostname -> {"websocket": ws, "api_key": key, "last_seen": timestamp, "failed_healthchecks": 0}
+        # hostname -> {
+        #   "command_ws": ws, 
+        #   "health_ws": ws,
+        #   "api_key": key, 
+        #   "last_seen": timestamp, 
+        #   "failed_healthchecks": 0
+        # }
         
-        # Store pending command responses
+        # Store pending command responses using dict for O(1) lookup
         self.pending_commands: Dict[str, dict] = {}
-        # command_id -> {"responses": {}, "total_nodes": int, "event": asyncio.Event()}
+        # command_id -> {"responses": {}, "total_nodes": int, "received": int, "event": asyncio.Event()}
         
         # Track background tasks
         self.background_tasks: List[asyncio.Task] = []
-        self.websocket_server_obj = None
+        self.command_server_obj = None
+        self.health_server_obj = None
         self._shutdown_event = asyncio.Event()
         self.routes_prefix = routes_prefix
+        
+        # Semaphore for rate limiting concurrent sends
+        self._send_semaphore = asyncio.Semaphore(max_concurrent_sends)
+        
+        # Lock for thread-safe slave dict modifications
+        self._slaves_lock = asyncio.Lock()
         
         # Create router
         self.router = self._create_router()
@@ -81,27 +98,39 @@ class ThunderboltMaster:
             self.pending_commands[command_id] = {
                 "responses": {},
                 "total_nodes": len(request.nodes),
+                "received": 0,
                 "event": asyncio.Event()
             }
             
             # Send command to all specified nodes in parallel
-            command_msg = {
+            command_msg = json.dumps({
                 "type": "command",
                 "command_id": command_id,
                 "command": request.command,
                 "timeout": request.timeout,
                 "use_sudo": request.use_sudo
-            }
+            })
             
+            # Batch send with rate limiting
             send_tasks = []
             for hostname in request.nodes:
-                slave_info = self.slaves[hostname]
-                send_tasks.append(
-                    slave_info["websocket"].send(json.dumps(command_msg))
-                )
+                slave_info = self.slaves.get(hostname)
+                if slave_info and slave_info.get("command_ws"):
+                    send_tasks.append(
+                        self._send_with_semaphore(
+                            slave_info["command_ws"], 
+                            command_msg,
+                            hostname
+                        )
+                    )
             
-            # Send all commands
-            await asyncio.gather(*send_tasks, return_exceptions=True)
+            # Send all commands in parallel with rate limiting
+            send_results = await asyncio.gather(*send_tasks, return_exceptions=True)
+            
+            # Count failed sends
+            failed_sends = sum(1 for r in send_results if isinstance(r, Exception))
+            if failed_sends > 0:
+                print(f"[Thunderbolt] {failed_sends}/{len(send_tasks)} command sends failed")
             
             # Wait for all responses (with timeout)
             try:
@@ -114,6 +143,7 @@ class ThunderboltMaster:
             
             # Collect results
             results = self.pending_commands[command_id]["responses"]
+            received = self.pending_commands[command_id]["received"]
             
             # Cleanup
             del self.pending_commands[command_id]
@@ -122,7 +152,8 @@ class ThunderboltMaster:
             return {
                 "command": request.command,
                 "total_nodes": len(request.nodes),
-                "responses_received": len(results),
+                "responses_received": received,
+                "failed_sends": failed_sends,
                 "results": results
             }
         
@@ -135,7 +166,9 @@ class ThunderboltMaster:
                     {
                         "hostname": hostname,
                         "last_seen": info["last_seen"].isoformat(),
-                        "failed_healthchecks": info["failed_healthchecks"]
+                        "failed_healthchecks": info["failed_healthchecks"],
+                        "command_connected": info.get("command_ws") is not None,
+                        "health_connected": info.get("health_ws") is not None
                     }
                     for hostname, info in self.slaves.items()
                 ]
@@ -144,18 +177,33 @@ class ThunderboltMaster:
         @router.get("/")
         async def root():
             return {
-                "message": "Master Command Runner",
-                "connected_slaves": len(self.slaves)
+                "message": "Thunderbolt Master Command Runner",
+                "connected_slaves": len(self.slaves),
+                "command_port": self.port,
+                "health_check_port": self.health_check_port
             }
         
         @router.get("/health")
         async def health():
-            return {"status": "healthy", "connected_slaves": len(self.slaves)}
+            return {
+                "status": "healthy", 
+                "connected_slaves": len(self.slaves),
+                "pending_commands": len(self.pending_commands)
+            }
         
         return router
     
-    async def handle_slave_connection(self, websocket):
-        """Handle incoming slave connections."""
+    async def _send_with_semaphore(self, websocket, message: str, hostname: str):
+        """Send message with semaphore-based rate limiting."""
+        async with self._send_semaphore:
+            try:
+                await websocket.send(message)
+            except Exception as e:
+                print(f"[Thunderbolt] Failed to send to {hostname}: {e}")
+                raise
+    
+    async def handle_command_connection(self, websocket):
+        """Handle incoming slave command connections."""
         hostname = None
         try:
             # Receive registration
@@ -172,53 +220,129 @@ class ThunderboltMaster:
             hostname = registration["hostname"]
             api_key = registration["api_key"]
             
-            # Store slave info
-            self.slaves[hostname] = {
-                "websocket": websocket,
-                "api_key": api_key,
-                "last_seen": datetime.now(),
-                "failed_healthchecks": 0
-            }
+            # Store or update slave info
+            async with self._slaves_lock:
+                if hostname not in self.slaves:
+                    self.slaves[hostname] = {
+                        "command_ws": websocket,
+                        "health_ws": None,
+                        "api_key": api_key,
+                        "last_seen": datetime.now(),
+                        "failed_healthchecks": 0
+                    }
+                else:
+                    self.slaves[hostname]["command_ws"] = websocket
+                    self.slaves[hostname]["api_key"] = api_key
             
             # Send acknowledgment
             await websocket.send(json.dumps({
                 "status": "registered",
-                "hostname": hostname
+                "hostname": hostname,
+                "connection_type": "command"
             }))
             
-            print(f"[Thunderbolt] Slave registered: {hostname}")
+            print(f"[Thunderbolt] Slave command channel registered: {hostname}")
             
             # Handle incoming messages from slave
             async for message in websocket:
                 data = json.loads(message)
                 
-                if data.get("type") == "healthcheck_response":
-                    self.slaves[hostname]["last_seen"] = datetime.now()
-                    self.slaves[hostname]["failed_healthchecks"] = 0
-                
-                elif data.get("type") == "command_result":
+                if data.get("type") == "command_result":
                     command_id = data.get("command_id")
                     if command_id in self.pending_commands:
-                        self.pending_commands[command_id]["responses"][hostname] = data
+                        pending = self.pending_commands[command_id]
+                        pending["responses"][hostname] = data
+                        pending["received"] += 1
                         
                         # Check if all responses received
-                        if len(self.pending_commands[command_id]["responses"]) >= self.pending_commands[command_id]["total_nodes"]:
-                            self.pending_commands[command_id]["event"].set()
+                        if pending["received"] >= pending["total_nodes"]:
+                            pending["event"].set()
         
         except websockets.exceptions.ConnectionClosed:
-            print(f"[Thunderbolt] Slave disconnected: {hostname}")
+            print(f"[Thunderbolt] Slave command channel disconnected: {hostname}")
         except asyncio.CancelledError:
-            print(f"[Thunderbolt] Connection cancelled for: {hostname}")
+            print(f"[Thunderbolt] Command connection cancelled for: {hostname}")
             raise
         except Exception as e:
-            print(f"[Thunderbolt] Error handling slave {hostname}: {e}")
+            print(f"[Thunderbolt] Error handling slave command {hostname}: {e}")
         finally:
-            if hostname and hostname in self.slaves:
-                del self.slaves[hostname]
-                print(f"[Thunderbolt] Removed slave: {hostname}")
+            if hostname:
+                async with self._slaves_lock:
+                    if hostname in self.slaves:
+                        self.slaves[hostname]["command_ws"] = None
+                        # Remove slave entirely if both connections are gone
+                        if not self.slaves[hostname].get("health_ws"):
+                            del self.slaves[hostname]
+                            print(f"[Thunderbolt] Removed slave: {hostname}")
+    
+    async def handle_health_connection(self, websocket):
+        """Handle incoming slave health check connections."""
+        hostname = None
+        try:
+            # Receive registration
+            registration_msg = await websocket.recv()
+            registration = json.loads(registration_msg)
+            
+            if registration.get("type") != "register":
+                await websocket.send(json.dumps({
+                    "status": "error",
+                    "message": "First message must be registration"
+                }))
+                return
+            
+            hostname = registration["hostname"]
+            
+            # Store or update slave info
+            async with self._slaves_lock:
+                if hostname not in self.slaves:
+                    self.slaves[hostname] = {
+                        "command_ws": None,
+                        "health_ws": websocket,
+                        "api_key": registration.get("api_key"),
+                        "last_seen": datetime.now(),
+                        "failed_healthchecks": 0
+                    }
+                else:
+                    self.slaves[hostname]["health_ws"] = websocket
+            
+            # Send acknowledgment
+            await websocket.send(json.dumps({
+                "status": "registered",
+                "hostname": hostname,
+                "connection_type": "health"
+            }))
+            
+            print(f"[Thunderbolt] Slave health channel registered: {hostname}")
+            
+            # Handle incoming health check responses
+            async for message in websocket:
+                data = json.loads(message)
+                
+                if data.get("type") == "healthcheck_response":
+                    async with self._slaves_lock:
+                        if hostname in self.slaves:
+                            self.slaves[hostname]["last_seen"] = datetime.now()
+                            self.slaves[hostname]["failed_healthchecks"] = 0
+        
+        except websockets.exceptions.ConnectionClosed:
+            print(f"[Thunderbolt] Slave health channel disconnected: {hostname}")
+        except asyncio.CancelledError:
+            print(f"[Thunderbolt] Health connection cancelled for: {hostname}")
+            raise
+        except Exception as e:
+            print(f"[Thunderbolt] Error handling slave health {hostname}: {e}")
+        finally:
+            if hostname:
+                async with self._slaves_lock:
+                    if hostname in self.slaves:
+                        self.slaves[hostname]["health_ws"] = None
+                        # Remove slave entirely if both connections are gone
+                        if not self.slaves[hostname].get("command_ws"):
+                            del self.slaves[hostname]
+                            print(f"[Thunderbolt] Removed slave: {hostname}")
     
     async def health_check_loop(self):
-        """Periodically health check all slaves."""
+        """Periodically health check all slaves in parallel."""
         try:
             while not self._shutdown_event.is_set():
                 try:
@@ -230,32 +354,53 @@ class ThunderboltMaster:
                 except asyncio.TimeoutError:
                     pass  # Normal timeout, continue with health check
                 
-                disconnected_slaves = []
+                # Pre-serialize health check message
+                health_check_msg = json.dumps({"type": "healthcheck"})
                 
-                for hostname, slave_info in list(self.slaves.items()):
-                    try:
-                        # Send health check
-                        await slave_info["websocket"].send(json.dumps({
-                            "type": "healthcheck"
-                        }))
-                        
-                        # Increment failed counter (will be reset if response received)
-                        slave_info["failed_healthchecks"] += 1
-                        
-                        # Check if slave has failed too many health checks
-                        if slave_info["failed_healthchecks"] >= self.max_failed_healthchecks:
+                # Get snapshot of slaves to avoid holding lock during sends
+                async with self._slaves_lock:
+                    slaves_snapshot = list(self.slaves.items())
+                
+                # Prepare parallel health check tasks
+                health_tasks = []
+                for hostname, slave_info in slaves_snapshot:
+                    health_tasks.append(
+                        self._send_health_check(hostname, slave_info, health_check_msg)
+                    )
+                
+                # Send all health checks in parallel
+                results = await asyncio.gather(*health_tasks, return_exceptions=True)
+                
+                # Process results and identify disconnected slaves
+                disconnected_slaves = []
+                async with self._slaves_lock:
+                    for (hostname, _), result in zip(slaves_snapshot, results):
+                        if hostname not in self.slaves:
+                            continue
+                            
+                        if isinstance(result, Exception):
+                            print(f"[Thunderbolt] Health check failed for {hostname}: {result}")
+                            disconnected_slaves.append(hostname)
+                        elif result is False:  # Max failures reached
                             print(f"[Thunderbolt] Slave {hostname} failed {self.max_failed_healthchecks} health checks. Disconnecting.")
                             disconnected_slaves.append(hostname)
-                            await slave_info["websocket"].close()
-                    
-                    except Exception as e:
-                        print(f"[Thunderbolt] Health check failed for {hostname}: {e}")
-                        disconnected_slaves.append(hostname)
                 
-                # Remove disconnected slaves
+                # Close connections and remove disconnected slaves
                 for hostname in disconnected_slaves:
-                    if hostname in self.slaves:
-                        del self.slaves[hostname]
+                    async with self._slaves_lock:
+                        if hostname in self.slaves:
+                            slave_info = self.slaves[hostname]
+                            # Close both connections
+                            close_tasks = []
+                            if slave_info.get("command_ws"):
+                                close_tasks.append(slave_info["command_ws"].close())
+                            if slave_info.get("health_ws"):
+                                close_tasks.append(slave_info["health_ws"].close())
+                            
+                            if close_tasks:
+                                await asyncio.gather(*close_tasks, return_exceptions=True)
+                            
+                            del self.slaves[hostname]
         
         except asyncio.CancelledError:
             print("[Thunderbolt] Health check loop cancelled")
@@ -263,54 +408,113 @@ class ThunderboltMaster:
         except Exception as e:
             print(f"[Thunderbolt] Health check loop error: {e}")
     
-    async def websocket_server(self):
-        """Run the WebSocket server for slave connections."""
+    async def _send_health_check(self, hostname: str, slave_info: dict, msg: str) -> bool:
+        """Send health check to a single slave. Returns False if max failures reached."""
         try:
-            self.websocket_server_obj = await serve(
-                self.handle_slave_connection, 
+            health_ws = slave_info.get("health_ws")
+            if not health_ws:
+                return False
+            
+            # Send health check
+            await health_ws.send(msg)
+            
+            # Increment failed counter (will be reset when response received)
+            async with self._slaves_lock:
+                if hostname in self.slaves:
+                    self.slaves[hostname]["failed_healthchecks"] += 1
+                    
+                    # Check if slave has failed too many health checks
+                    if self.slaves[hostname]["failed_healthchecks"] >= self.max_failed_healthchecks:
+                        return False
+            
+            return True
+            
+        except Exception as e:
+            raise e
+    
+    async def command_server(self):
+        """Run the WebSocket server for command connections."""
+        try:
+            self.command_server_obj = await serve(
+                self.handle_command_connection, 
                 "0.0.0.0", 
                 self.port,
-                ping_interval=20,
-                ping_timeout=10
+                ping_interval=30,
+                ping_timeout=10,
+                max_size=10 * 1024 * 1024  # 10MB max message size
             )
-            print(f"[Thunderbolt] WebSocket server listening on port {self.port}")
+            print(f"[Thunderbolt] Command WebSocket server listening on port {self.port}")
             
             # Wait for shutdown signal
             await self._shutdown_event.wait()
             
             # Close the server
-            self.websocket_server_obj.close()
-            await self.websocket_server_obj.wait_closed()
-            print("[Thunderbolt] WebSocket server closed")
+            self.command_server_obj.close()
+            await self.command_server_obj.wait_closed()
+            print("[Thunderbolt] Command WebSocket server closed")
             
         except asyncio.CancelledError:
-            print("[Thunderbolt] WebSocket server cancelled")
-            if self.websocket_server_obj:
-                self.websocket_server_obj.close()
-                await self.websocket_server_obj.wait_closed()
+            print("[Thunderbolt] Command WebSocket server cancelled")
+            if self.command_server_obj:
+                self.command_server_obj.close()
+                await self.command_server_obj.wait_closed()
             raise
         except Exception as e:
-            print(f"[Thunderbolt] WebSocket server error: {e}")
+            print(f"[Thunderbolt] Command WebSocket server error: {e}")
+            raise
+    
+    async def health_server(self):
+        """Run the WebSocket server for health check connections."""
+        try:
+            self.health_server_obj = await serve(
+                self.handle_health_connection, 
+                "0.0.0.0", 
+                self.health_check_port,
+                ping_interval=20,
+                ping_timeout=10
+            )
+            print(f"[Thunderbolt] Health WebSocket server listening on port {self.health_check_port}")
+            
+            # Wait for shutdown signal
+            await self._shutdown_event.wait()
+            
+            # Close the server
+            self.health_server_obj.close()
+            await self.health_server_obj.wait_closed()
+            print("[Thunderbolt] Health WebSocket server closed")
+            
+        except asyncio.CancelledError:
+            print("[Thunderbolt] Health WebSocket server cancelled")
+            if self.health_server_obj:
+                self.health_server_obj.close()
+                await self.health_server_obj.wait_closed()
+            raise
+        except Exception as e:
+            print(f"[Thunderbolt] Health WebSocket server error: {e}")
             raise
     
     def start_background_tasks(self) -> List[asyncio.Task]:
-        """Start websocket server and health check loop as background tasks."""
+        """Start websocket servers and health check loop as background tasks."""
         print("[Thunderbolt] Starting background tasks...")
         
         # Clear shutdown event
         self._shutdown_event.clear()
         
         # Create tasks
-        ws_task = asyncio.create_task(
-            self.websocket_server(),
-            name="thunderbolt-websocket"
+        command_ws_task = asyncio.create_task(
+            self.command_server(),
+            name="thunderbolt-command-websocket"
+        )
+        health_ws_task = asyncio.create_task(
+            self.health_server(),
+            name="thunderbolt-health-websocket"
         )
         health_task = asyncio.create_task(
             self.health_check_loop(),
             name="thunderbolt-health-check"
         )
         
-        self.background_tasks = [ws_task, health_task]
+        self.background_tasks = [command_ws_task, health_ws_task, health_task]
         
         print(f"[Thunderbolt] Started {len(self.background_tasks)} background tasks")
         return self.background_tasks
@@ -322,13 +526,17 @@ class ThunderboltMaster:
         # Signal shutdown
         self._shutdown_event.set()
         
-        # Close all slave connections
+        # Close all slave connections in parallel
         close_tasks = []
-        for hostname, slave_info in list(self.slaves.items()):
-            try:
-                close_tasks.append(slave_info["websocket"].close())
-            except Exception as e:
-                print(f"[Thunderbolt] Error closing connection to {hostname}: {e}")
+        async with self._slaves_lock:
+            for hostname, slave_info in list(self.slaves.items()):
+                try:
+                    if slave_info.get("command_ws"):
+                        close_tasks.append(slave_info["command_ws"].close())
+                    if slave_info.get("health_ws"):
+                        close_tasks.append(slave_info["health_ws"].close())
+                except Exception as e:
+                    print(f"[Thunderbolt] Error closing connection to {hostname}: {e}")
         
         if close_tasks:
             await asyncio.gather(*close_tasks, return_exceptions=True)
@@ -368,7 +576,10 @@ class ThunderboltMaster:
         
         import uvicorn
         api_port = port or (self.port + 1)
-        print(f"[Thunderbolt] Starting ThunderBolt Master on port {api_port} (WebSocket on {self.port})")
+        print(f"[Thunderbolt] Starting ThunderBolt Master")
+        print(f"  - API Server: {host}:{api_port}")
+        print(f"  - Command WebSocket: {host}:{self.port}")
+        print(f"  - Health WebSocket: {host}:{self.health_check_port}")
         uvicorn.run(self.app, host=host, port=api_port)
 
 

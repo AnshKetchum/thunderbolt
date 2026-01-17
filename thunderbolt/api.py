@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-API Client for Master Command Runner
+API Client for Thunderbolt Master
 """
 import requests
 from typing import List, Optional, Dict, Any
 
 
 class ThunderboltAPI:
-    """Client for interacting with the Master Command Runner API."""
+    """Client for interacting with the Thunderbolt Master API."""
     
     def __init__(self, host: str = "localhost", port: int = 8001, base_path: str = ""):
         """
-        Initialize the Master API client.
+        Initialize the Thunderbolt API client.
         
         Args:
             host: Master server hostname or IP
             port: Master server REST API port (default: 8001)
-            base_path: Base path prefix for the API (e.g., "/thunderbolt")
+            base_path: Base path prefix for the API (e.g., "/api/v1")
         """
         self.base_path = base_path.rstrip("/")  # Remove trailing slash if present
         self.base_url = f"http://{host}:{port}{self.base_path}"
@@ -29,6 +29,12 @@ class ThunderboltAPI:
             Dict containing:
                 - total: Number of connected nodes
                 - nodes: List of node information dicts
+                    Each node dict contains:
+                        - hostname: Node hostname
+                        - last_seen: ISO timestamp of last communication
+                        - failed_healthchecks: Number of consecutive failed health checks
+                        - command_connected: Whether command channel is connected
+                        - health_connected: Whether health channel is connected
         
         Raises:
             requests.exceptions.RequestException: If the request fails
@@ -59,13 +65,18 @@ class ThunderboltAPI:
                 - command: The executed command
                 - total_nodes: Total number of target nodes
                 - responses_received: Number of responses received
+                - failed_sends: Number of nodes where command send failed
                 - results: Dict mapping hostname to result dict
                     Each result contains:
+                        - type: "command_result"
+                        - command_id: UUID of the command
                         - hostname: Node hostname
-                        - stdout: Command standard output
-                        - stderr: Command standard error
-                        - returncode: Exit code
-                        - status: "success", "error", or "timeout"
+                        - command: The executed command
+                        - success: Boolean indicating if command succeeded
+                        - exit_code: Exit code (if success=True)
+                        - stdout: Command standard output (if success=True)
+                        - stderr: Command standard error (if success=True)
+                        - error: Error message (if success=False)
         
         Raises:
             requests.exceptions.RequestException: If the request fails
@@ -87,9 +98,28 @@ class ThunderboltAPI:
         Check master server health.
         
         Returns:
-            Dict with health status and number of connected slaves
+            Dict containing:
+                - status: "healthy"
+                - connected_slaves: Number of connected slave nodes
+                - pending_commands: Number of commands awaiting responses
         """
         url = f"{self.base_url}/health"
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.json()
+    
+    def info(self) -> Dict[str, Any]:
+        """
+        Get master server information.
+        
+        Returns:
+            Dict containing:
+                - message: Server description
+                - connected_slaves: Number of connected slaves
+                - command_port: Command WebSocket port
+                - health_check_port: Health check WebSocket port
+        """
+        url = f"{self.base_url}/"
         response = requests.get(url)
         response.raise_for_status()
         return response.json()
@@ -104,11 +134,26 @@ class ThunderboltAPI:
         nodes_data = self.list_nodes()
         return [node['hostname'] for node in nodes_data['nodes']]
     
+    def get_fully_connected_nodes(self) -> List[str]:
+        """
+        Get list of nodes with both command and health channels connected.
+        
+        Returns:
+            List of hostname strings for fully connected nodes
+        """
+        nodes_data = self.list_nodes()
+        return [
+            node['hostname'] 
+            for node in nodes_data['nodes']
+            if node.get('command_connected') and node.get('health_connected')
+        ]
+    
     def run_on_all_nodes(
         self,
         command: str,
         timeout: int = 30,
-        use_sudo: bool = False
+        use_sudo: bool = False,
+        require_fully_connected: bool = True
     ) -> Dict[str, Any]:
         """
         Execute a command on all connected nodes.
@@ -117,6 +162,7 @@ class ThunderboltAPI:
             command: Shell command to execute
             timeout: Command timeout in seconds (default: 30)
             use_sudo: Whether to run with sudo privileges (default: False)
+            require_fully_connected: Only run on nodes with both channels connected (default: True)
         
         Returns:
             Same format as run_command()
@@ -124,11 +170,55 @@ class ThunderboltAPI:
         Raises:
             ValueError: If no nodes are connected
         """
-        hostnames = self.get_node_hostnames()
+        if require_fully_connected:
+            hostnames = self.get_fully_connected_nodes()
+        else:
+            hostnames = self.get_node_hostnames()
+            
         if not hostnames:
             raise ValueError("No nodes are connected")
         
         return self.run_command(command, hostnames, timeout, use_sudo)
+    
+    def get_command_summary(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generate a summary of command execution results.
+        
+        Args:
+            result: Result dict from run_command() or run_on_all_nodes()
+        
+        Returns:
+            Dict containing:
+                - total_nodes: Total target nodes
+                - successful: Number of successful executions
+                - failed: Number of failed executions
+                - timed_out: Number of nodes that didn't respond
+                - failed_sends: Number of nodes where send failed
+                - success_rate: Percentage of successful executions
+        """
+        total = result['total_nodes']
+        received = result['responses_received']
+        failed_sends = result.get('failed_sends', 0)
+        
+        successful = 0
+        failed = 0
+        
+        for hostname, node_result in result['results'].items():
+            if node_result.get('success'):
+                successful += 1
+            else:
+                failed += 1
+        
+        timed_out = total - received - failed_sends
+        
+        return {
+            'total_nodes': total,
+            'successful': successful,
+            'failed': failed,
+            'timed_out': timed_out,
+            'failed_sends': failed_sends,
+            'success_rate': (successful / total * 100) if total > 0 else 0.0
+        }
     
     def close(self):
         """Close the underlying session (no-op without session)."""
