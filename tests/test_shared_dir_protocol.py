@@ -6,6 +6,8 @@ volume mount, tests the shared directory broadcast protocol, and tears down
 the infrastructure.
 """
 
+import os
+import shutil
 import pytest
 import docker
 import time
@@ -15,6 +17,7 @@ from typing import List
 import logging
 from thunderbolt.api import ThunderboltAPI
 from cluster_utils import ThunderboltTestCluster, logger
+import tempfile
 
 
 @pytest.fixture(scope="function")
@@ -23,8 +26,8 @@ def thunderbolt_shared_dir_cluster():
     # Use a temporary directory that will be mounted as shared storage
     import tempfile
     
-    shared_dir = tempfile.mkdtemp(prefix="thunderbolt_test_")
-    logger.info(f"Created shared directory: {shared_dir}")
+    shared_dir = tempfile.mkdtemp(prefix="thunderbolt_test_", dir=os.getcwd())
+    print(f"Created shared directory: {shared_dir}")
     
     cluster = ThunderboltTestCluster(
         num_slaves=15,  # Use 15 slaves to trigger shared dir threshold (default: 10)
@@ -40,16 +43,15 @@ def thunderbolt_shared_dir_cluster():
         # Cleanup shared directory
         import shutil
         shutil.rmtree(shared_dir, ignore_errors=True)
-        logger.info(f"Cleaned up shared directory: {shared_dir}")
+        print(f"Cleaned up shared directory: {shared_dir}")
 
 
 @pytest.fixture(scope="function")
 def thunderbolt_small_cluster_with_shared_dir():
     """Pytest fixture for small cluster (below threshold) with shared dir configured."""
-    import tempfile
     
-    shared_dir = tempfile.mkdtemp(prefix="thunderbolt_test_small_")
-    logger.info(f"Created shared directory: {shared_dir}")
+    shared_dir = tempfile.mkdtemp(prefix="thunderbolt_test_small_", dir=os.getcwd())
+    print(f"Created shared directory: {shared_dir}")
     
     cluster = ThunderboltTestCluster(
         num_slaves=5,  # Below threshold, should use WebSocket
@@ -62,9 +64,8 @@ def thunderbolt_small_cluster_with_shared_dir():
         yield cluster
     finally:
         cluster.teardown()
-        import shutil
         shutil.rmtree(shared_dir, ignore_errors=True)
-        logger.info(f"Cleaned up shared directory: {shared_dir}")
+        print(f"Cleaned up shared directory: {shared_dir}")
 
 
 class TestThunderboltSharedDirectory:
@@ -82,7 +83,8 @@ class TestThunderboltSharedDirectory:
         cluster = thunderbolt_shared_dir_cluster
         shared_dir = Path(cluster.shared_dir)
         
-        logger.info("Test 1: Verifying shared directory setup...")
+        print("Test 1: Verifying shared directory setup...")
+        print(thunderbolt_shared_dir_cluster.num_slaves, thunderbolt_shared_dir_cluster.shared_dir_threshold)
         
         # Check shared directory exists
         assert shared_dir.exists(), "Shared directory does not exist"
@@ -97,7 +99,7 @@ class TestThunderboltSharedDirectory:
             jobs = json.load(f)
             assert isinstance(jobs, dict), "jobs.json should contain a dict"
         
-        logger.info("✓ Shared directory setup verified")
+        print("✓ Shared directory setup verified")
         
         # Wait a bit for slaves to create their directories
         time.sleep(2)
@@ -108,11 +110,11 @@ class TestThunderboltSharedDirectory:
         
         for hostname in nodes:
             node_dir = shared_dir / hostname
-            logger.info(f"Checking node directory: {node_dir}")
+            print(f"Checking node directory: {node_dir}")
             assert node_dir.exists(), f"Node directory not created for {hostname}"
             assert node_dir.is_dir(), f"Node path is not a directory for {hostname}"
         
-        logger.info("✓ All slave directories created")
+        print("✓ All slave directories created")
     
     def test_broadcast_mode_execution(self, thunderbolt_shared_dir_cluster):
         """
@@ -123,7 +125,7 @@ class TestThunderboltSharedDirectory:
         api = thunderbolt_shared_dir_cluster.get_api()
         cluster = thunderbolt_shared_dir_cluster
         
-        logger.info("Test: Executing command via broadcast mode...")
+        print("Test: Executing command via broadcast mode...")
         
         # Get all nodes
         all_hostnames = api.get_node_hostnames()
@@ -148,12 +150,12 @@ class TestThunderboltSharedDirectory:
         
         # Check all results are successful
         for hostname, result in results["results"].items():
-            logger.info(f"Node {hostname}: success={result.get('success')}")
+            print(f"Node {hostname}: success={result.get('success')}")
             assert result.get("success") is True, \
                 f"Command failed on {hostname}: {result.get('error')}"
             assert "Broadcast mode test" in result.get("stdout", "")
         
-        logger.info("✓ Broadcast mode execution successful")
+        print("✓ Broadcast mode execution successful")
         
         # Verify cleanup - jobs.json should not have the command anymore
         shared_dir = Path(cluster.shared_dir)
@@ -162,7 +164,7 @@ class TestThunderboltSharedDirectory:
             jobs = json.load(f)
             assert len(jobs) == 0, "jobs.json should be empty after execution"
         
-        logger.info("✓ Job cleanup verified")
+        print("✓ Job cleanup verified")
     
     def test_websocket_mode_below_threshold(self, thunderbolt_small_cluster_with_shared_dir):
         """
@@ -172,7 +174,7 @@ class TestThunderboltSharedDirectory:
         """
         api = thunderbolt_small_cluster_with_shared_dir.get_api()
         
-        logger.info("Test: Executing command via WebSocket (below threshold)...")
+        print("Test: Executing command via WebSocket (below threshold)...")
         
         # Get all nodes
         all_hostnames = api.get_node_hostnames()
@@ -194,7 +196,7 @@ class TestThunderboltSharedDirectory:
         assert results["total_nodes"] == 5
         assert results["responses_received"] == 5
         
-        logger.info("✓ WebSocket mode used correctly below threshold")
+        print("✓ WebSocket mode used correctly below threshold")
     
     def test_force_broadcast_mode(self, thunderbolt_small_cluster_with_shared_dir):
         """
@@ -202,7 +204,7 @@ class TestThunderboltSharedDirectory:
         """
         api = thunderbolt_small_cluster_with_shared_dir.get_api()
         
-        logger.info("Test: Forcing broadcast mode...")
+        print("Test: Forcing broadcast mode...")
         
         # Get all nodes
         all_hostnames = api.get_node_hostnames()
@@ -227,7 +229,7 @@ class TestThunderboltSharedDirectory:
             assert result.get("success") is True
             assert "Forced broadcast test" in result.get("stdout", "")
         
-        logger.info("✓ Forced broadcast mode successful")
+        print("✓ Forced broadcast mode successful")
     
     def test_force_websocket_mode(self, thunderbolt_shared_dir_cluster):
         """
@@ -235,7 +237,7 @@ class TestThunderboltSharedDirectory:
         """
         api = thunderbolt_shared_dir_cluster.get_api()
         
-        logger.info("Test: Forcing WebSocket mode...")
+        print("Test: Forcing WebSocket mode...")
         
         # Get all nodes
         all_hostnames = api.get_node_hostnames()
@@ -256,7 +258,7 @@ class TestThunderboltSharedDirectory:
         # Verify results
         assert results["responses_received"] == 15
         
-        logger.info("✓ Forced WebSocket mode successful")
+        print("✓ Forced WebSocket mode successful")
     
     def test_batched_commands_broadcast(self, thunderbolt_shared_dir_cluster):
         """
@@ -265,7 +267,7 @@ class TestThunderboltSharedDirectory:
         api = thunderbolt_shared_dir_cluster.get_api()
         cluster = thunderbolt_shared_dir_cluster
         
-        logger.info("Test: Batched commands via broadcast...")
+        print("Test: Batched commands via broadcast...")
         
         # Get all nodes
         all_hostnames = api.get_node_hostnames()
@@ -307,12 +309,12 @@ class TestThunderboltSharedDirectory:
             cmd_result = commands_results[0]
             result = cmd_result.get("result", {})
             
-            logger.info(f"Node {hostname} batch result: {result}")
+            print(f"Node {hostname} batch result: {result}")
             assert result.get("success") is True, \
                 f"Batch command failed on {hostname}: {result.get('error')}"
             assert f"Batch command {i}" in result.get("stdout", "")
         
-        logger.info("✓ Batched commands broadcast successful")
+        print("✓ Batched commands broadcast successful")
         
         # Verify cleanup
         shared_dir = Path(cluster.shared_dir)
@@ -321,7 +323,7 @@ class TestThunderboltSharedDirectory:
             jobs = json.load(f)
             assert len(jobs) == 0, "jobs.json should be empty after batched execution"
         
-        logger.info("✓ Batched job cleanup verified")
+        print("✓ Batched job cleanup verified")
     
     def test_batched_multiple_commands_per_node(self, thunderbolt_shared_dir_cluster):
         """
@@ -329,7 +331,7 @@ class TestThunderboltSharedDirectory:
         """
         api = thunderbolt_shared_dir_cluster.get_api()
         
-        logger.info("Test: Multiple batched commands per node...")
+        print("Test: Multiple batched commands per node...")
         
         # Get first 3 nodes
         all_hostnames = api.get_node_hostnames()
@@ -380,7 +382,7 @@ class TestThunderboltSharedDirectory:
                 assert result.get("success") is True
                 assert expected_outputs[i] in result.get("stdout", "")
         
-        logger.info("✓ Multiple batched commands per node successful")
+        print("✓ Multiple batched commands per node successful")
     
     def test_shared_dir_timeout_handling(self, thunderbolt_shared_dir_cluster):
         """
@@ -388,7 +390,7 @@ class TestThunderboltSharedDirectory:
         """
         api = thunderbolt_shared_dir_cluster.get_api()
         
-        logger.info("Test: Timeout handling in broadcast mode...")
+        print("Test: Timeout handling in broadcast mode...")
         
         # Get subset of nodes
         all_hostnames = api.get_node_hostnames()
@@ -404,14 +406,14 @@ class TestThunderboltSharedDirectory:
         
         # Check that nodes reported timeout
         for hostname, result in results["results"].items():
-            logger.info(f"Node {hostname} timeout result: {result}")
+            print(f"Node {hostname} timeout result: {result}")
             assert result.get("success") is False, \
                 f"Expected failure for timeout on {hostname}"
             assert "error" in result
             assert "timed out" in result["error"].lower() or \
                    "timeout" in result["error"].lower()
         
-        logger.info("✓ Timeout handling in broadcast mode verified")
+        print("✓ Timeout handling in broadcast mode verified")
     
     def test_shared_dir_error_handling(self, thunderbolt_shared_dir_cluster):
         """
@@ -419,7 +421,7 @@ class TestThunderboltSharedDirectory:
         """
         api = thunderbolt_shared_dir_cluster.get_api()
         
-        logger.info("Test: Error handling in broadcast mode...")
+        print("Test: Error handling in broadcast mode...")
         
         # Get all nodes
         all_hostnames = api.get_node_hostnames()
@@ -434,13 +436,13 @@ class TestThunderboltSharedDirectory:
         
         # Check that nodes reported non-zero exit code
         for hostname, result in results["results"].items():
-            logger.info(f"Node {hostname} error result: {result}")
+            print(f"Node {hostname} error result: {result}")
             assert result.get("success") is True, \
                 "Command should execute successfully even with non-zero exit"
             assert result.get("exit_code") == 42, \
                 f"Expected exit_code 42, got {result.get('exit_code')}"
         
-        logger.info("✓ Error handling in broadcast mode verified")
+        print("✓ Error handling in broadcast mode verified")
     
     def test_result_file_cleanup(self, thunderbolt_shared_dir_cluster):
         """
@@ -450,7 +452,7 @@ class TestThunderboltSharedDirectory:
         cluster = thunderbolt_shared_dir_cluster
         shared_dir = Path(cluster.shared_dir)
         
-        logger.info("Test: Result file cleanup...")
+        print("Test: Result file cleanup...")
         
         # Get all nodes
         all_hostnames = api.get_node_hostnames()
@@ -471,14 +473,14 @@ class TestThunderboltSharedDirectory:
             node_dir = shared_dir / hostname
             result_files = list(node_dir.glob("*.json"))
             
-            logger.info(f"Node {hostname} directory has {len(result_files)} result files")
+            print(f"Node {hostname} directory has {len(result_files)} result files")
             
             # Should be empty or only contain very recent files
             # (in case of race condition with another test)
             assert len(result_files) == 0, \
                 f"Result files not cleaned up for {hostname}: {result_files}"
         
-        logger.info("✓ Result file cleanup verified")
+        print("✓ Result file cleanup verified")
     
     def test_concurrent_job_execution(self, thunderbolt_shared_dir_cluster):
         """
@@ -486,7 +488,7 @@ class TestThunderboltSharedDirectory:
         """
         api = thunderbolt_shared_dir_cluster.get_api()
         
-        logger.info("Test: Concurrent job execution...")
+        print("Test: Concurrent job execution...")
         
         # Get all nodes
         all_hostnames = api.get_node_hostnames()
@@ -525,7 +527,7 @@ class TestThunderboltSharedDirectory:
             assert result.get("success") is True
             assert "Group 2 test" in result.get("stdout", "")
         
-        logger.info("✓ Concurrent job execution successful")
+        print("✓ Concurrent job execution successful")
     
     def test_hybrid_operation(self, thunderbolt_shared_dir_cluster):
         """
@@ -533,7 +535,7 @@ class TestThunderboltSharedDirectory:
         """
         api = thunderbolt_shared_dir_cluster.get_api()
         
-        logger.info("Test: Hybrid operation (WebSocket + Shared Dir)...")
+        print("Test: Hybrid operation (WebSocket + Shared Dir)...")
         
         # Get subset of nodes
         all_hostnames = api.get_node_hostnames()
@@ -571,7 +573,7 @@ class TestThunderboltSharedDirectory:
             assert results_sd["results"][hostname].get("success") is True
             assert "Shared dir test" in results_sd["results"][hostname].get("stdout", "")
         
-        logger.info("✓ Hybrid operation successful")
+        print("✓ Hybrid operation successful")
     
     def test_partial_node_completion(self, thunderbolt_shared_dir_cluster):
         """
@@ -581,7 +583,7 @@ class TestThunderboltSharedDirectory:
         """
         api = thunderbolt_shared_dir_cluster.get_api()
         
-        logger.info("Test: Partial node completion...")
+        print("Test: Partial node completion...")
         
         # Get nodes
         all_hostnames = api.get_node_hostnames()
@@ -608,6 +610,7 @@ class TestThunderboltSharedDirectory:
                 })
         
         results = api.run_batched_commands(commands)
+        print("Fast commands to ", target_nodes[:5], "slow to", target_nodes[5:])
         
         # Check that we got results from all nodes
         assert len(results["results"]) == 10
@@ -631,7 +634,7 @@ class TestThunderboltSharedDirectory:
             assert "timed out" in result.get("error", "").lower() or \
                    "timeout" in result.get("error", "").lower()
         
-        logger.info("✓ Partial node completion handled correctly")
+        print("✓ Partial node completion handled correctly")
 
 
 if __name__ == "__main__":

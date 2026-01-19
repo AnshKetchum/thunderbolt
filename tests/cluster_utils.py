@@ -1,6 +1,7 @@
 import pytest
 import docker
 import time
+import os
 from typing import List, Optional
 import logging
 from pathlib import Path
@@ -37,13 +38,24 @@ class ThunderboltTestCluster:
         self.shared_dir_poll_interval = shared_dir_poll_interval
         self.shared_dir_container_path = "/shared" if shared_dir else None
         
+        # Debug logging configuration
+        self.debug_enabled = os.getenv("TEST_DEBUG", "").lower() in ("1", "true", "yes")
+        self.debug_log_dir = Path("test_docker_logs")
+        self.test_run_id = f"{int(time.time())}"
+        
+        if self.debug_enabled:
+            # Create debug log directory for this test run
+            self.test_log_dir = self.debug_log_dir / self.test_run_id
+            self.test_log_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[DEBUG] Logging enabled - logs will be saved to: {self.test_log_dir}")
+
     def setup(self):
         """Set up the test cluster with master and slave containers."""
-        logger.info("Setting up thunderbolt test cluster...")
-        logger.info(f"  Slaves: {self.num_slaves}")
+        print("Setting up thunderbolt test cluster...")
+        print(f"  Slaves: {self.num_slaves}")
         if self.shared_dir:
-            logger.info(f"  Shared directory: {self.shared_dir}")
-            logger.info(f"  Shared dir threshold: {self.shared_dir_threshold}")
+            print(f"  Shared directory: {self.shared_dir}")
+            print(f"  Shared dir threshold: {self.shared_dir_threshold}")
         
         # Create a dedicated network for the test
         network_name = f"thunderbolt-test-{int(time.time())}"
@@ -51,14 +63,14 @@ class ThunderboltTestCluster:
             name=network_name,
             driver="bridge"
         )
-        logger.info(f"Created network: {network_name}")
+        print(f"Created network: {network_name}")
         
         # Build the thunderbolt image if it doesn't exist
         try:
             self.client.images.get("thunderbolt:test")
-            logger.info("Using existing thunderbolt:test image")
+            print("Using existing thunderbolt:test image")
         except docker.errors.ImageNotFound:
-            logger.info("Building thunderbolt:test image...")
+            print("Building thunderbolt:test image...")
             self.client.images.build(
                 path=".",
                 tag="thunderbolt:test",
@@ -66,12 +78,12 @@ class ThunderboltTestCluster:
             )
         
         # Start master container
-        logger.info("Starting master container...")
+        print("Starting master container...")
         self.master_container = self._start_master(network_name)
         
         # Wait for master to be ready
         self._wait_for_master()
-        logger.info("Master container is ready")
+        print("Master container is ready")
         
         # Initialize API client
         self.api = ThunderboltAPI(host="localhost", port=self.api_port)
@@ -79,14 +91,14 @@ class ThunderboltTestCluster:
         # Start slave containers
         for i in range(self.num_slaves):
             slave_name = f"thunderbolt-slave-{i}"
-            logger.info(f"Starting slave container: {slave_name}")
+            print(f"Starting slave container: {slave_name}")
             
             slave_container = self._start_slave(network_name, slave_name)
             self.slave_containers.append(slave_container)
         
         # Wait for slaves to connect
         self._wait_for_slaves()
-        logger.info(f"All {self.num_slaves} slave containers are connected")
+        print(f"All {self.num_slaves} slave containers are connected")
         
     def _start_master(self, network_name: str):
         """Start the master container with appropriate configuration."""
@@ -100,6 +112,7 @@ class ThunderboltTestCluster:
         ]
         
         # Add shared directory args if configured
+
         if self.shared_dir:
             command.extend([
                 "--shared-dir", self.shared_dir_container_path,
@@ -186,7 +199,7 @@ class ThunderboltTestCluster:
                 temp_api = ThunderboltAPI(host="localhost", port=self.api_port)
                 health_data = temp_api.health()
                 temp_api.close()
-                logger.info(f"Master health check: {health_data}")
+                print(f"Master health check: {health_data}")
                 return
             except Exception as e:
                 logger.debug(f"Waiting for master: {e}")
@@ -197,6 +210,7 @@ class ThunderboltTestCluster:
         if self.master_container:
             logs = self.master_container.logs().decode('utf-8')
             logger.error(f"Master container logs:\n{logs}")
+            self._save_container_logs("master", logs)
         
         raise TimeoutError(f"Master did not become ready within {timeout}s")
     
@@ -221,7 +235,7 @@ class ThunderboltTestCluster:
                 )
                 
                 if fully_connected >= self.num_slaves:
-                    logger.info(f"All slaves fully connected: {[n['hostname'] for n in nodes]}")
+                    print(f"All slaves fully connected: {[n['hostname'] for n in nodes]}")
                     
                     # If using shared directory, verify slave directories were created
                     if self.shared_dir:
@@ -229,7 +243,7 @@ class ThunderboltTestCluster:
                     
                     return
                 
-                logger.info(f"Waiting for slaves... ({fully_connected}/{self.num_slaves} fully connected)")
+                print(f"Waiting for slaves... ({fully_connected}/{self.num_slaves} fully connected)")
                     
             except Exception as e:
                 logger.debug(f"Waiting for slaves to connect: {e}")
@@ -241,10 +255,12 @@ class ThunderboltTestCluster:
         if self.master_container:
             master_logs = self.master_container.logs().decode('utf-8')
             logger.error(f"Master logs:\n{master_logs}")
+            self._save_container_logs("master", master_logs)
         
         for i, container in enumerate(self.slave_containers):
             slave_logs = container.logs().decode('utf-8')
             logger.error(f"Slave {i} logs:\n{slave_logs}")
+            self._save_container_logs(f"slave-{i}", slave_logs)
         
         raise TimeoutError(f"Slaves did not connect within {timeout}s")
     
@@ -272,9 +288,51 @@ class ThunderboltTestCluster:
             else:
                 logger.debug(f"Verified node directory for {hostname}")
     
+    def _save_container_logs(self, container_name: str, logs: str):
+        """Save container logs to debug directory if debug mode is enabled."""
+        if not self.debug_enabled:
+            return
+        
+        try:
+            log_file = self.test_log_dir / f"{container_name}.log"
+            with open(log_file, 'w') as f:
+                f.write(logs)
+            print(f"[DEBUG] Saved logs for {container_name} to {log_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save logs for {container_name}: {e}")
+    
+    def _save_all_logs(self):
+        """Save logs from all containers to debug directory."""
+        if not self.debug_enabled:
+            return
+        
+        print(f"[DEBUG] Saving all container logs to {self.test_log_dir}")
+        
+        # Save master logs
+        if self.master_container:
+            try:
+                logs = self.master_container.logs().decode('utf-8')
+                self._save_container_logs("master", logs)
+            except Exception as e:
+                logger.warning(f"Failed to get master logs: {e}")
+        
+        # Save slave logs
+        for i, container in enumerate(self.slave_containers):
+            try:
+                logs = container.logs().decode('utf-8')
+                self._save_container_logs(f"slave-{i}", logs)
+            except Exception as e:
+                logger.warning(f"Failed to get slave-{i} logs: {e}")
+        
+        print(f"[DEBUG] All logs saved to {self.test_log_dir}")
+    
     def teardown(self):
         """Tear down the test cluster."""
-        logger.info("Tearing down thunderbolt test cluster...")
+        print("Tearing down thunderbolt test cluster...")
+        
+        # Save all logs before tearing down (if debug enabled)
+        if self.debug_enabled:
+            self._save_all_logs()
         
         # Close API client
         if self.api:
@@ -283,7 +341,7 @@ class ThunderboltTestCluster:
         # Stop and remove slave containers
         for i, container in enumerate(self.slave_containers):
             try:
-                logger.info(f"Stopping slave container {i}...")
+                print(f"Stopping slave container {i}...")
                 container.stop(timeout=5)
             except Exception as e:
                 logger.warning(f"Error stopping slave container {i}: {e}")
@@ -291,7 +349,7 @@ class ThunderboltTestCluster:
         # Stop and remove master container
         if self.master_container:
             try:
-                logger.info("Stopping master container...")
+                print("Stopping master container...")
                 self.master_container.stop(timeout=5)
             except Exception as e:
                 logger.warning(f"Error stopping master container: {e}")
@@ -299,12 +357,12 @@ class ThunderboltTestCluster:
         # Remove network
         if self.network:
             try:
-                logger.info("Removing network...")
+                print("Removing network...")
                 self.network.remove()
             except Exception as e:
                 logger.warning(f"Error removing network: {e}")
         
-        logger.info("Teardown complete")
+        print("Teardown complete")
     
     def get_api(self) -> ThunderboltAPI:
         """Get the Thunderbolt API client."""

@@ -61,6 +61,9 @@ class SharedDirExecutor:
         
         # Poll for completion
         results = await self._poll_results(command_id, nodes, timeout)
+
+        # Cleanup job and result files
+        self._cleanup_job(command_id, nodes)
         
         return {
             "command": command,
@@ -94,7 +97,7 @@ class SharedDirExecutor:
         results = await self._poll_results(command_id, list(node_queues.keys()), max_timeout)
         
         # Cleanup
-        # self._cleanup_job(command_id, list(node_queues.keys()))
+        self._cleanup_job(command_id, list(node_queues.keys()))
         
         return {
             "total_commands": sum(len(cmds) for cmds in node_queues.values()),
@@ -167,25 +170,24 @@ class SharedDirExecutor:
     
     def _cleanup_job(self, command_id: str, nodes: List[str]):
         """Cleanup job and result files."""
-        pass
-        # try:
-        #     jobs = {}
-        #     if self.jobs_file.exists():
-        #         with open(self.jobs_file, 'r') as f:
-        #             jobs = json.load(f)
+        try:
+            jobs = {}
+            if self.jobs_file.exists():
+                with open(self.jobs_file, 'r') as f:
+                    jobs = json.load(f)
             
-        #     if command_id in jobs:
-        #         del jobs[command_id]
-        #         temp_file = self.jobs_file.with_suffix('.tmp')
-        #         with open(temp_file, 'w') as f:
-        #             json.dump(jobs, f, indent=2)
-        #         temp_file.replace(self.jobs_file)
+            if command_id in jobs:
+                del jobs[command_id]
+                temp_file = self.jobs_file.with_suffix('.tmp')
+                with open(temp_file, 'w') as f:
+                    json.dump(jobs, f, indent=2)
+                temp_file.replace(self.jobs_file)
             
-        #     for hostname in nodes:
-        #         node_dir = self.shared_dir / hostname
-        #         result_file = node_dir / f"{command_id}.json"
-        #         if result_file.exists():
-        #             result_file.unlink()
+            for hostname in nodes:
+                node_dir = self.shared_dir / hostname
+                result_file = node_dir / f"{command_id}.json"
+                if result_file.exists():
+                    result_file.unlink()
                     
-        # except Exception as e:
-        #     print(f"[Thunderbolt] Error cleaning up job {command_id}: {e}")
+        except Exception as e:
+            print(f"[Thunderbolt] Error cleaning up job {command_id}: {e}")
