@@ -2,7 +2,7 @@ import asyncio
 import json
 import uuid
 from typing import List, Dict
-from .response_models import BatchedResponse, CommandResult
+from .response_models import CommandResult
 
 class WebSocketExecutor:
     """Executes commands via WebSocket connections."""
@@ -98,7 +98,7 @@ class WebSocketExecutor:
 
         return results
 
-    async def execute_batched(self, command_specs: List[dict]) -> BatchedResponse:
+    async def execute_batched(self, command_specs: List[dict]) -> List[CommandResult]:
         """Execute batched commands via websocket, maintaining input order."""
         print("Sending command via batched api")
         
@@ -187,15 +187,7 @@ class WebSocketExecutor:
         tasks = [execute_single_command(cmd_spec) for cmd_spec in command_specs]
         results = await asyncio.gather(*tasks)
         
-        # Get unique nodes count
-        nodes_set = {cmd["node"] for cmd in command_specs}
-        
-        return BatchedResponse(
-            total_commands=len(command_specs),
-            total_nodes=len(nodes_set),
-            method="websocket",
-            results=results
-        )
+        return results
     
     async def _send_with_semaphore(self, websocket, message: str, hostname: str):
         """Send message with semaphore-based rate limiting."""

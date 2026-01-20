@@ -59,16 +59,14 @@ class TestThunderboltBatchedCommands:
         ]
         
         # Execute batched commands
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         
-        # Verify response structure using typed response
-        assert result.total_commands == 2, "Expected 2 total commands"
-        assert result.total_nodes == 2, "Expected 2 nodes"
-        assert len(result.results) == 2, "Expected 2 results"
+        # Verify response structure
+        assert len(results) == 2, "Expected 2 results"
         
         # Verify each command result in order
-        print("Got results", result.results)
-        for i, cmd_result in enumerate(result.results):
+        logger.info(f"Got results: {results}")
+        for i, cmd_result in enumerate(results):
             expected_hostname = all_hostnames[i]
             expected_msg = f"Hello from node {i + 1}"
             
@@ -109,12 +107,10 @@ class TestThunderboltBatchedCommands:
         ]
         
         # Execute batched commands
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         
-        # Verify response structure using typed response
-        assert result.total_commands == 5, "Expected 5 total commands"
-        assert result.total_nodes == 2, "Expected 2 nodes"
-        assert len(result.results) == 5, "Expected 5 results"
+        # Verify response structure
+        assert len(results) == 5, "Expected 5 results"
         
         # Verify order preservation - commands should be in same order as input
         expected_outputs = [
@@ -126,7 +122,7 @@ class TestThunderboltBatchedCommands:
         ]
         
         for i, (expected_node, expected_msg) in enumerate(expected_outputs):
-            cmd_result = result.results[i]
+            cmd_result = results[i]
             
             assert cmd_result.node == expected_node, \
                 f"Command {i}: expected node {expected_node}, got {cmd_result.node}"
@@ -154,27 +150,26 @@ class TestThunderboltBatchedCommands:
             {"node": node1, "command": "echo 'After timeout'", "timeout": 10},
         ]
         
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         
-        # Verify structure using typed response
-        assert result.total_commands == 3
-        assert len(result.results) == 3
+        # Verify structure
+        assert len(results) == 3
         
         # First command should succeed
-        assert result.results[0].exit_code == 0
-        assert "Quick command" in (result.results[0].stdout or "")
+        assert results[0].exit_code == 0
+        assert "Quick command" in (results[0].stdout or "")
         
         # Second command should timeout
-        print(result.results[1])
-        assert result.results[1].stderr or result.results[1].timed_out, \
+        logger.info(f"Timeout result: {results[1]}")
+        assert results[1].error or results[1].timed_out, \
             "Expected timeout to be reported"
-        if result.results[1].stderr:
-            assert "timeout" in result.results[1].stderr.lower(), \
-                f"Expected timeout error, got: {result.results[1].stderr}"
+        if results[1].error:
+            assert results[1].timed_out, \
+                f"Expected timeout error, got: {results[1].error}"
         
         # Third command should still execute (sequential execution continues)
-        assert result.results[2].exit_code == 0
-        assert "After timeout" in (result.results[2].stdout or "")
+        assert results[2].exit_code == 0
+        assert "After timeout" in (results[2].stdout or "")
         
         logger.info("✓ Batched timeout handling successful")
     
@@ -195,21 +190,21 @@ class TestThunderboltBatchedCommands:
             {"node": node1, "command": "echo 'After error'", "timeout": 10},
         ]
         
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         
-        # Verify structure using typed response
-        assert len(result.results) == 3
+        # Verify structure
+        assert len(results) == 3
         
         # First command succeeds
-        assert result.results[0].exit_code == 0
+        assert results[0].exit_code == 0
         
         # Second command executes but returns error code
-        assert result.results[1].exit_code == 1, \
-            f"Expected exit code 1, got {result.results[1].exit_code}"
+        assert results[1].exit_code == 1, \
+            f"Expected exit code 1, got {results[1].exit_code}"
         
         # Third command still executes (sequential execution continues)
-        assert result.results[2].exit_code == 0
-        assert "After error" in (result.results[2].stdout or "")
+        assert results[2].exit_code == 0
+        assert "After error" in (results[2].stdout or "")
         
         logger.info("✓ Batched error handling successful")
     
@@ -245,12 +240,10 @@ class TestThunderboltBatchedCommands:
         logger.info("Test: Batched commands with empty list...")
         
         commands = []
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         
-        # Should return empty results using typed response
-        assert result.total_commands == 0
-        assert result.total_nodes == 0
-        assert len(result.results) == 0
+        # Should return empty results
+        assert len(results) == 0, "Expected empty results list"
         
         logger.info("✓ Empty batched commands handled correctly")
     
@@ -275,12 +268,10 @@ class TestThunderboltBatchedCommands:
             {"node": node1, "command": "echo 'N1-C3'", "timeout": 10},
         ]
         
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         
-        # Verify totals using typed response
-        assert result.total_commands == 5
-        assert result.total_nodes == 2
-        assert len(result.results) == 5
+        # Verify totals
+        assert len(results) == 5, "Expected 5 results"
         
         # Verify order preservation - results should match input order
         expected = [
@@ -292,7 +283,7 @@ class TestThunderboltBatchedCommands:
         ]
         
         for i, (expected_node, expected_msg) in enumerate(expected):
-            cmd_result = result.results[i]
+            cmd_result = results[i]
             
             assert cmd_result.node == expected_node, \
                 f"Result {i}: expected node {expected_node}, got {cmd_result.node}"
@@ -300,44 +291,6 @@ class TestThunderboltBatchedCommands:
                 f"Result {i}: expected '{expected_msg}' in stdout"
         
         logger.info("✓ Complex batched execution successful")
-    
-    def test_batched_summary_helper(self, thunderbolt_cluster):
-        """
-        Test the batched command summary helper function.
-        """
-        api = thunderbolt_cluster.get_api()
-        
-        all_hostnames = api.get_node_hostnames()
-        node1 = all_hostnames[0]
-        node2 = all_hostnames[1]
-        
-        logger.info("Test: Batched command summary generation...")
-        
-        # Execute some commands with mixed success
-        commands = [
-            {"node": node1, "command": "echo 'Success 1'", "timeout": 10},
-            {"node": node1, "command": "exit 1", "timeout": 10},  # Non-zero exit
-            {"node": node2, "command": "echo 'Success 2'", "timeout": 10},
-            {"node": node2, "command": "echo 'Success 3'", "timeout": 10},
-        ]
-        
-        result = api.run_batched_commands(commands)
-        
-        # Generate summary
-        summary = api.get_batched_summary(result)
-        
-        logger.info(f"Batched command summary: {summary.dict()}")
-        
-        # Verify summary fields using typed response
-        assert summary.total_commands == 4
-        assert summary.total_nodes == 2
-        # First command succeeds (exit 0), second has exit 1 (counts as failure),
-        # third and fourth succeed
-        assert summary.successful_commands == 3
-        assert summary.failed_commands == 1
-        assert summary.success_rate == 75.0
-        
-        logger.info("✓ Batched command summary generation successful")
     
     def test_batched_parallel_execution_timing(self, thunderbolt_cluster):
         """
@@ -363,15 +316,15 @@ class TestThunderboltBatchedCommands:
         ]
         
         start_time = time.time()
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         elapsed_time = time.time() - start_time
         
         logger.info(f"Elapsed time: {elapsed_time:.2f} seconds")
         
-        # Verify both commands succeeded using typed response
-        assert len(result.results) == 2
-        for cmd_result in result.results:
-            assert cmd_result.exit_code == 0 or not cmd_result.stderr
+        # Verify both commands succeeded
+        assert len(results) == 2
+        for cmd_result in results:
+            assert cmd_result.exit_code == 0 or not cmd_result.error
         
         # Should take roughly 2 seconds (parallel), not 4 (sequential)
         # Allow some overhead for network/processing
@@ -402,15 +355,15 @@ class TestThunderboltBatchedCommands:
         ]
         
         start_time = time.time()
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         elapsed_time = time.time() - start_time
         
         logger.info(f"Elapsed time: {elapsed_time:.2f} seconds")
         
-        # Verify all commands succeeded in order using typed response
-        assert len(result.results) == 3
+        # Verify all commands succeeded in order
+        assert len(results) == 3
         
-        for i, cmd_result in enumerate(result.results, 1):
+        for i, cmd_result in enumerate(results, 1):
             assert cmd_result.exit_code == 0
             assert f"Command {i}" in (cmd_result.stdout or "")
         
@@ -440,22 +393,20 @@ class TestThunderboltBatchedCommands:
             {"node": node1, "command": "sleep 10", "timeout": 2},  # Will timeout
         ]
         
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         
-        assert len(result.results) == 4
+        assert len(results) == 4
         
         # First two should succeed
-        assert result.results[0].exit_code == 0
-        assert result.results[1].exit_code == 0
+        assert results[0].exit_code == 0
+        assert results[1].exit_code == 0
         
         # Third should succeed (sleeps 3s, timeout 10s)
-        assert result.results[2].exit_code == 0
+        assert results[2].exit_code == 0
         
         # Fourth should timeout (sleeps 10s, timeout 2s)
-        assert result.results[3].stderr or result.results[3].timed_out, \
+        assert results[3].error or results[3].timed_out, \
             "Expected timeout for 4th command"
-        if result.results[3].stderr:
-            assert "timeout" in result.results[3].stderr.lower()
         
         logger.info("✓ Different timeouts handled correctly")
 

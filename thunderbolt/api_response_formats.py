@@ -18,14 +18,6 @@ class NodesListResponse(BaseModel):
     nodes: List[NodeInfo]
 
 
-class CommandResponse(BaseModel):
-    """Response from executing a single command."""
-    command: str
-    total_nodes: int
-    responses_received: int
-    failed_sends: Optional[int] = 0
-    method: str
-    results: Dict[str, Any]
 
 
 class HealthResponse(BaseModel):

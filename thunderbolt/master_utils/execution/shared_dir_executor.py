@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from fastapi import HTTPException
 
-from .response_models import BatchedResponse, CommandResult
+from .response_models import CommandResult
 
 
 class SharedDirExecutor:
@@ -93,7 +93,7 @@ class SharedDirExecutor:
 
         return results
  
-    async def execute_batched(self, command_specs: List[dict]) -> BatchedResponse:
+    async def execute_batched(self, command_specs: List[dict]) -> List[CommandResult]:
         """Execute batched commands via shared directory."""
         job_id = str(uuid.uuid4())
         
@@ -146,12 +146,7 @@ class SharedDirExecutor:
         # Cleanup
         self._cleanup_job(job_id, list(nodes_set))
         
-        return BatchedResponse(
-            total_commands=len(command_specs),
-            total_nodes=len(nodes_set),
-            method="shared_directory",
-            results=results
-        )
+        return results
     
     def _write_job(self, job_id: str, job_data: dict):
         """Write job to jobs file atomically."""

@@ -328,44 +328,6 @@ class TestThunderboltBatchedCommandsPrivileged:
         
         logger.info("✓ Complex batched execution successful")
     
-    def test_batched_summary_helper(self, thunderbolt_cluster):
-        """
-        Test the batched command summary helper function.
-        """
-        api = thunderbolt_cluster.get_api()
-        
-        all_hostnames = api.get_node_hostnames()
-        node1 = all_hostnames[0]
-        node2 = all_hostnames[1]
-        
-        logger.info("Test: Batched command summary generation...")
-        
-        # Execute some commands with mixed success
-        commands = [
-            {"node": node1, "command": "echo 'Success 1'", "timeout": 10},
-            {"node": node1, "command": "exit 1", "timeout": 10},  # Non-zero exit
-            {"node": node2, "command": "echo 'Success 2'", "timeout": 10},
-            {"node": node2, "command": "echo 'Success 3'", "timeout": 10},
-        ]
-        
-        result = api.run_batched_commands(commands)
-        
-        # Generate summary
-        summary = api.get_batched_summary(result)
-        
-        logger.info(f"Batched command summary: {summary.dict()}")
-        
-        # Verify summary fields using typed response
-        assert summary.total_commands == 4
-        assert summary.total_nodes == 2
-        # First command succeeds (exit 0), second has exit 1 (counts as failure),
-        # third and fourth succeed
-        assert summary.successful_commands == 3
-        assert summary.failed_commands == 1
-        assert summary.success_rate == 75.0
-        
-        logger.info("✓ Batched command summary generation successful")
-    
     def test_batched_parallel_execution_timing(self, thunderbolt_cluster):
         """
         Test that batched commands execute in parallel across nodes.

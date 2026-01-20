@@ -2,6 +2,7 @@ from fastapi import HTTPException, APIRouter
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import uuid
+from .execution.response_models import CommandResult
 
 
 class CommandRequest(BaseModel):
@@ -17,24 +18,6 @@ class BatchedCommandRequest(BaseModel):
     force_method: Optional[str] = None
 
 
-class CommandResult(BaseModel):
-    command_uuid: str
-    node: str
-    command: str
-    stdout: Optional[str] = None
-    stderr: Optional[str] = None
-    exit_code: Optional[int] = None
-    error: Optional[str] = None
-    timed_out: bool = False
-
-
-class BatchedResponse(BaseModel):
-    total_commands: int
-    total_nodes: int
-    method: str
-    results: List[CommandResult]
-
-
 def create_router(master) -> APIRouter:
     """Create the FastAPI router with all endpoints."""
     
@@ -43,7 +26,7 @@ def create_router(master) -> APIRouter:
     else:
         router = APIRouter()
     
-    @router.post("/run")
+    @router.post("/run", response_model=List[CommandResult])
     async def run_command(request: CommandRequest):
         """Execute a command on specified nodes in parallel."""
         # Validate nodes
@@ -84,16 +67,11 @@ def create_router(master) -> APIRouter:
                 request.use_sudo
             )
     
-    @router.post("/run_batched", response_model=BatchedResponse)
+    @router.post("/run_batched", response_model=List[CommandResult])
     async def run_batched_commands(request: BatchedCommandRequest):
         """Execute different commands on different nodes in parallel."""
         if not request.commands:
-            return BatchedResponse(
-                total_commands=0,
-                total_nodes=0,
-                method="none",
-                results=[]
-            )
+            return []
         
         # Assign UUID to each command and preserve order
         command_specs = []
@@ -142,12 +120,12 @@ def create_router(master) -> APIRouter:
             use_shared_dir = master._should_use_shared_dir(total_commands)
         
         if use_shared_dir:
-            response = await master.shared_dir_executor.execute_batched(command_specs)
+            results = await master.shared_dir_executor.execute_batched(command_specs)
         else:
-            response = await master.ws_executor.execute_batched(command_specs)
+            results = await master.ws_executor.execute_batched(command_specs)
         
-        print(f"Master sending response {response}") 
-        return response
+        print(f"Master sending response {results}") 
+        return results
     
     @router.get("/nodes")
     async def list_nodes():

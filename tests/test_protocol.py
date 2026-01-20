@@ -65,7 +65,7 @@ class TestThunderboltProtocol:
         
         # Test 3: Execute a dummy command on all slaves
         logger.info("Test 3: Executing dummy command on all slaves...")
-        result = api.run_command(
+        results = api.run_command(
             command="echo 'Hello from thunderbolt test!'",
             nodes=node_hostnames,
             timeout=10,
@@ -74,27 +74,20 @@ class TestThunderboltProtocol:
         
         # Test 4: Verify results
         logger.info("Test 4: Verifying command results...")
-        assert result.total_nodes == 2, "Expected 2 target nodes"
-        assert result.responses_received == 2, "Expected 2 responses"
-        assert result.failed_sends == 0, "Expected 0 failed sends"
-        
-        assert len(result.results) == 2, f"Expected results from 2 slaves, got {len(result.results)}"
+        assert len(results) == 2, f"Expected results from 2 slaves, got {len(results)}"
         
         # Check each slave's result
-        for hostname in node_hostnames:
-            assert hostname in result.results, f"Missing result from {hostname}"
-            slave_result = result.results[hostname]
+        for result in results:
+            logger.info(f"Slave {result.node} result: error={result.error}, "
+                       f"exit_code={result.exit_code}, "
+                       f"stdout={result.stdout[:50] if result.stdout else ''}")
             
-            logger.info(f"Slave {hostname} result: success={slave_result.get('success')}, "
-                       f"exit_code={slave_result.get('exit_code')}, "
-                       f"stdout={slave_result.get('stdout', '')[:50]}")
-            
-            assert slave_result.get("success") is True, \
-                f"Slave {hostname} execution failed: {slave_result.get('error', 'Unknown error')}"
-            assert slave_result.get("exit_code") == 0, \
-                f"Slave {hostname} returned non-zero exit code"
-            assert "Hello from thunderbolt test!" in slave_result.get("stdout", ""), \
-                f"Unexpected output from slave {hostname}"
+            assert result.error is None, \
+                f"Slave {result.node} execution failed: {result.error}"
+            assert result.exit_code == 0, \
+                f"Slave {result.node} returned non-zero exit code"
+            assert "Hello from thunderbolt test!" in (result.stdout or ""), \
+                f"Unexpected output from slave {result.node}"
         
         logger.info("✓ All tests passed!")
     
@@ -138,7 +131,7 @@ class TestThunderboltProtocol:
         target_node = all_hostnames[0]
         logger.info(f"Executing command on specific node: {target_node}")
         
-        result = api.run_command(
+        results = api.run_command(
             command="echo 'Specific node test'",
             nodes=[target_node],
             timeout=10,
@@ -146,16 +139,16 @@ class TestThunderboltProtocol:
         )
         
         # Should only have one result
-        assert result.total_nodes == 1
-        assert result.responses_received == 1
-        assert result.failed_sends == 0
-        assert target_node in result.results
+        assert len(results) == 1, f"Expected 1 result, got {len(results)}"
+        
+        result = results[0]
+        assert result.node == target_node, f"Expected result from {target_node}, got {result.node}"
         
         # Verify the result is successful
-        node_result = result.results[target_node]
-        assert node_result["success"] is True, f"Command failed: {node_result.get('error')}"
-        assert node_result["exit_code"] == 0
-        assert "Specific node test" in node_result["stdout"]
+        assert result.error is None, f"Command failed: {result.error}"
+        assert result.exit_code == 0, f"Expected exit code 0, got {result.exit_code}"
+        assert "Specific node test" in (result.stdout or ""), \
+            f"Expected output not found in stdout: {result.stdout}"
         
         logger.info("✓ Specific node execution successful")
     
@@ -194,7 +187,7 @@ class TestThunderboltProtocol:
         
         logger.info("Executing command with timeout...")
         
-        result = api.run_command(
+        results = api.run_command(
             command="sleep 10",
             nodes=all_hostnames,
             timeout=2,  # 2 second timeout for a 10 second sleep
@@ -202,13 +195,15 @@ class TestThunderboltProtocol:
         )
         
         # Check that slaves reported timeout
-        for hostname, node_result in result.results.items():
-            logger.info(f"Slave {hostname} timeout result: {node_result}")
-            assert node_result["success"] is False, \
-                f"Expected failure for timeout, got success=True"
-            assert "error" in node_result, "Expected error field in timeout result"
-            assert "timed out" in node_result["error"].lower() or "timeout" in node_result["error"].lower(), \
-                f"Expected timeout message in error, got: {node_result['error']}"
+        for result in results:
+            logger.info(f"Slave {result.node} timeout result: error={result.error}, "
+                       f"timed_out={result.timed_out}")
+            assert result.error is not None, \
+                f"Expected error for timeout on {result.node}"
+            assert result.timed_out is True, \
+                f"Expected timed_out=True for {result.node}, got {result.timed_out}"
+            assert "timed out" in result.error.lower() or "timeout" in result.error.lower(), \
+                f"Expected timeout message in error, got: {result.error}"
         
         logger.info("✓ Command timeout handled correctly")
     
@@ -223,7 +218,7 @@ class TestThunderboltProtocol:
         
         logger.info("Executing command that will fail...")
         
-        result = api.run_command(
+        results = api.run_command(
             command="exit 1",  # Command that returns error
             nodes=all_hostnames,
             timeout=10,
@@ -231,14 +226,15 @@ class TestThunderboltProtocol:
         )
         
         # Check that slaves reported error
-        for hostname, node_result in result.results.items():
-            logger.info(f"Slave {hostname} error result: {node_result}")
+        for result in results:
+            logger.info(f"Slave {result.node} error result: exit_code={result.exit_code}, "
+                       f"error={result.error}")
             
             # Command executed successfully but returned non-zero exit code
-            assert node_result["success"] is True, \
-                "Command should execute successfully even with non-zero exit"
-            assert node_result["exit_code"] == 1, \
-                f"Expected exit_code 1, got {node_result['exit_code']}"
+            assert result.error is None, \
+                f"Command should execute without error even with non-zero exit on {result.node}"
+            assert result.exit_code == 1, \
+                f"Expected exit_code 1 on {result.node}, got {result.exit_code}"
         
         logger.info("✓ Command error handled correctly")
     
@@ -250,7 +246,7 @@ class TestThunderboltProtocol:
         
         logger.info("Testing run_on_all_nodes convenience method...")
         
-        result = api.run_on_all_nodes(
+        results = api.run_on_all_nodes(
             command="echo 'Testing all nodes'",
             timeout=10,
             use_sudo=False,
@@ -258,47 +254,16 @@ class TestThunderboltProtocol:
         )
         
         # Verify we got results from all nodes
-        assert result.total_nodes == 2
-        assert result.responses_received == 2
-        assert result.failed_sends == 0
+        assert len(results) == 2, f"Expected 2 results, got {len(results)}"
         
         # Check all results are successful
-        for hostname, node_result in result.results.items():
-            assert node_result["success"] is True, \
-                f"Command failed on {hostname}: {node_result.get('error')}"
-            assert "Testing all nodes" in node_result["stdout"]
+        for result in results:
+            assert result.error is None, \
+                f"Command failed on {result.node}: {result.error}"
+            assert "Testing all nodes" in (result.stdout or ""), \
+                f"Expected output not found on {result.node}"
         
         logger.info("✓ Run on all nodes successful")
-    
-    def test_command_summary(self, thunderbolt_cluster):
-        """
-        Test the command summary helper function.
-        """
-        api = thunderbolt_cluster.get_api()
-        
-        logger.info("Testing command summary generation...")
-        
-        # Execute a command
-        result = api.run_on_all_nodes(
-            command="echo 'Summary test'",
-            timeout=10,
-            use_sudo=False
-        )
-        
-        # Generate summary
-        summary = api.get_command_summary(result)
-        
-        logger.info(f"Command summary: {summary.dict()}")
-        
-        # Verify summary fields using typed attributes
-        assert summary.total_nodes == 2
-        assert summary.successful == 2
-        assert summary.failed == 0
-        assert summary.timed_out == 0
-        assert summary.failed_sends == 0
-        assert summary.success_rate == 100.0
-        
-        logger.info("✓ Command summary generation successful")
     
     def test_master_info_endpoint(self, thunderbolt_cluster):
         """
@@ -343,3 +308,43 @@ class TestThunderboltProtocol:
             "Fully connected nodes should match all nodes in test"
         
         logger.info("✓ Fully connected nodes filter working correctly")
+    
+    def test_batched_commands(self, thunderbolt_cluster):
+        """
+        Test executing batched commands on different nodes.
+        """
+        api = thunderbolt_cluster.get_api()
+        
+        logger.info("Testing batched commands...")
+        
+        # Get all nodes
+        all_hostnames = api.get_node_hostnames()
+        
+        # Create batched commands
+        commands = [
+            {"node": all_hostnames[0], "command": "echo 'First command'", "timeout": 10},
+            {"node": all_hostnames[0], "command": "echo 'Second command'", "timeout": 10},
+            {"node": all_hostnames[1], "command": "echo 'Third command'", "timeout": 10},
+        ]
+        
+        results = api.run_batched_commands(commands)
+        
+        # Verify we got results in the same order
+        assert len(results) == 3, f"Expected 3 results, got {len(results)}"
+        
+        # Check results match input order
+        assert results[0].node == all_hostnames[0]
+        assert "First command" in (results[0].stdout or "")
+        
+        assert results[1].node == all_hostnames[0]
+        assert "Second command" in (results[1].stdout or "")
+        
+        assert results[2].node == all_hostnames[1]
+        assert "Third command" in (results[2].stdout or "")
+        
+        # Verify all succeeded
+        for result in results:
+            assert result.error is None, f"Command failed on {result.node}: {result.error}"
+            assert result.exit_code == 0, f"Non-zero exit code on {result.node}"
+        
+        logger.info("✓ Batched commands successful")
