@@ -15,11 +15,3 @@ class CommandResult(BaseModel):
     exit_code: Optional[int] = None
     error: Optional[str] = None
     timed_out: bool = False
-
-
-class BatchedResponse(BaseModel):
-    """Model for batched command response."""
-    total_commands: int
-    total_nodes: int
-    method: str
-    results: List[CommandResult]

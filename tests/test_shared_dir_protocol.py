@@ -24,7 +24,6 @@ import tempfile
 def thunderbolt_shared_dir_cluster():
     """Pytest fixture that provides a thunderbolt test cluster with shared directory."""
     
-    # shared_dir = "/shared/home/aegis/dummy_channel_3"
     shared_dir = tempfile.mkdtemp(prefix="thunderbolt_test_", dir=os.getcwd())
     print(f"Created shared directory: {shared_dir}")
     
