@@ -219,39 +219,47 @@ class SharedDirExecutor:
         """Poll for batched command results, keyed by command_uuid."""
         start_time = datetime.now()
         results = {}
-        completed_uuids = set()
-        total_commands = len(command_specs)
         
-        # Create lookup for command specs by UUID
-        uuid_to_spec = {cmd["command_uuid"]: cmd for cmd in command_specs}
+        # Get unique nodes from command specs
+        nodes = list({cmd["node"] for cmd in command_specs})
+        completed_nodes = set()
         
-        while len(completed_uuids) < total_commands:
+        while len(completed_nodes) < len(nodes):
             elapsed = (datetime.now() - start_time).total_seconds()
             if elapsed > timeout + 10:
                 print(f"[Thunderbolt] Batched job {job_id} timed out")
                 break
             
-            for cmd_uuid, spec in uuid_to_spec.items():
-                if cmd_uuid in completed_uuids:
+            for node in nodes:
+                if node in completed_nodes:
                     continue
                 
-                node = spec["node"]
                 node_dir = self.shared_dir / node
-                result_file = node_dir / f"{cmd_uuid}.json"
+                result_file = node_dir / f"{job_id}.json"
                 
                 if result_file.exists():
                     try:
                         with open(result_file, 'r') as f:
-                            result_data = json.load(f)
-                        results[cmd_uuid] = result_data
-                        completed_uuids.add(cmd_uuid)
+                            batch_result = json.load(f)
+                        
+                        # Extract individual command results from the batch
+                        command_results = batch_result.get("results", [])
+                        for cmd_result in command_results:
+                            cmd_uuid = cmd_result.get("command_uuid")
+                            if cmd_uuid:
+                                results[cmd_uuid] = cmd_result
+                        
+                        completed_nodes.add(node)
+                        print(f"[Thunderbolt] Collected {len(command_results)} results from {node}")
+                        
                     except Exception as e:
-                        print(f"[Thunderbolt] Error reading result for {cmd_uuid} from {node}: {e}")
+                        print(f"[Thunderbolt] Error reading batch result from {node}: {e}")
             
             await asyncio.sleep(self.poll_interval)
         
-        return results
-    
+        print(f"[Thunderbolt] Batched job {job_id} complete: {len(results)}/{len(command_specs)} results")
+        return results 
+
     def _cleanup_job(self, job_id: str, nodes: List[str]):
         """Cleanup job and result files."""
         try:

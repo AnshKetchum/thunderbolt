@@ -97,11 +97,11 @@ class JobPoller:
             use_sudo=job_data.get("use_sudo", False)
         )
         
-        # Write result with timing information
+        # Write result with timing information (convert CommandResult to dict)
         await self.result_writer.write_command_result(
             command_id=command_id,
             command=job_data.get("command"),
-            result=result,
+            result=result.model_dump(),
             job_received_at=job_received_at
         )
         
@@ -109,22 +109,36 @@ class JobPoller:
     
     async def _handle_batched_command(self, command_id: str, job_data: dict, job_received_at: str):
         """Handle a batched command job."""
-        node_commands = job_data.get("node_commands", {})
-        if self.dir_mgr.hostname not in node_commands:
+        # Filter commands for this node from the flat commands list
+        all_commands = job_data.get("commands", [])
+        my_commands = [
+            cmd for cmd in all_commands 
+            if cmd.get("node") == self.dir_mgr.hostname
+        ]
+        
+        if not my_commands:
             return
         
-        print(f"[JobPoller] Processing batched job {command_id}")
+        print(f"[JobPoller] Processing batched job {command_id} with {len(my_commands)} commands for this node")
         
-        # Execute batch
-        batch_result = await self.batch_executor.execute_batch(
+        # Execute batch - returns list[CommandResult]
+        batch_results = await self.batch_executor.execute_batch(
             command_id=command_id,
-            commands=node_commands[self.dir_mgr.hostname]
+            commands=my_commands
         )
+        
+        # Convert list of CommandResult to the format expected by result_writer
+        batch_result_dict = {
+            "type": "batch_result",
+            "command_id": command_id,
+            "hostname": self.dir_mgr.hostname,
+            "results": [result.model_dump() for result in batch_results]
+        }
         
         # Write result with timing information
         await self.result_writer.write_batch_result(
             command_id=command_id,
-            batch_result=batch_result,
+            batch_result=batch_result_dict,
             job_received_at=job_received_at
         )
         

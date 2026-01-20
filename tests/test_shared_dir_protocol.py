@@ -23,9 +23,8 @@ import tempfile
 @pytest.fixture(scope="function")
 def thunderbolt_shared_dir_cluster():
     """Pytest fixture that provides a thunderbolt test cluster with shared directory."""
-    # Use a temporary directory that will be mounted as shared storage
-    import tempfile
     
+    # shared_dir = "/shared/home/aegis/dummy_channel_3"
     shared_dir = tempfile.mkdtemp(prefix="thunderbolt_test_", dir=os.getcwd())
     print(f"Created shared directory: {shared_dir}")
     
@@ -41,7 +40,6 @@ def thunderbolt_shared_dir_cluster():
     finally:
         cluster.teardown()
         # Cleanup shared directory
-        import shutil
         shutil.rmtree(shared_dir, ignore_errors=True)
         print(f"Cleaned up shared directory: {shared_dir}")
 
@@ -132,28 +130,22 @@ class TestThunderboltSharedDirectory:
         assert len(all_hostnames) == 15, f"Expected 15 nodes, got {len(all_hostnames)}"
         
         # Execute command (should use shared directory)
-        result = api.run_command(
+        results = api.run_command(
             command="echo 'Broadcast mode test'",
             nodes=all_hostnames,
             timeout=30,
             use_sudo=False
         )
         
-        # Verify execution method using typed response
-        assert result.method == "shared_directory", \
-            f"Expected shared_directory method, got {result.method}"
-        
-        # Verify results
-        assert result.total_nodes == 15
-        assert result.responses_received == 15, \
-            f"Expected 15 responses, got {result.responses_received}"
+        # Verify results - API returns List[CommandResult]
+        assert len(results) == 15, f"Expected 15 results, got {len(results)}"
         
         # Check all results are successful
-        for hostname, node_result in result.results.items():
-            print(f"Node {hostname}: success={node_result.get('success')}")
-            assert node_result.get("success") is True, \
-                f"Command failed on {hostname}: {node_result.get('error')}"
-            assert "Broadcast mode test" in node_result.get("stdout", "")
+        for cmd_result in results:
+            print(f"Node {cmd_result.node}: exit_code={cmd_result.exit_code}")
+            assert cmd_result.exit_code == 0, \
+                f"Command failed on {cmd_result.node}: {cmd_result.error}"
+            assert "Broadcast mode test" in (cmd_result.stdout or "")
         
         print("✓ Broadcast mode execution successful")
         
@@ -181,20 +173,17 @@ class TestThunderboltSharedDirectory:
         assert len(all_hostnames) == 5, f"Expected 5 nodes, got {len(all_hostnames)}"
         
         # Execute command (should use WebSocket)
-        result = api.run_command(
+        results = api.run_command(
             command="echo 'WebSocket mode test'",
             nodes=all_hostnames,
             timeout=30,
             use_sudo=False
         )
         
-        # Verify execution method using typed response
-        assert result.method == "websocket", \
-            f"Expected websocket method, got {result.method}"
-        
         # Verify results
-        assert result.total_nodes == 5
-        assert result.responses_received == 5
+        assert len(results) == 5
+        for cmd_result in results:
+            assert cmd_result.exit_code == 0
         
         print("✓ WebSocket mode used correctly below threshold")
     
@@ -210,7 +199,7 @@ class TestThunderboltSharedDirectory:
         all_hostnames = api.get_node_hostnames()
         
         # Force shared directory mode
-        result = api.run_command(
+        results = api.run_command(
             command="echo 'Forced broadcast test'",
             nodes=all_hostnames,
             timeout=30,
@@ -218,16 +207,12 @@ class TestThunderboltSharedDirectory:
             force_method="shared_dir"
         )
         
-        # Verify execution method using typed response
-        assert result.method == "shared_directory", \
-            f"Expected shared_directory method, got {result.method}"
-        
         # Verify results
-        assert result.responses_received == 5
+        assert len(results) == 5
         
-        for hostname, node_result in result.results.items():
-            assert node_result.get("success") is True
-            assert "Forced broadcast test" in node_result.get("stdout", "")
+        for cmd_result in results:
+            assert cmd_result.exit_code == 0
+            assert "Forced broadcast test" in (cmd_result.stdout or "")
         
         print("✓ Forced broadcast mode successful")
     
@@ -243,7 +228,7 @@ class TestThunderboltSharedDirectory:
         all_hostnames = api.get_node_hostnames()
         
         # Force WebSocket mode
-        result = api.run_command(
+        results = api.run_command(
             command="echo 'Forced WebSocket test'",
             nodes=all_hostnames,
             timeout=30,
@@ -251,12 +236,10 @@ class TestThunderboltSharedDirectory:
             force_method="websocket"
         )
         
-        # Verify execution method using typed response
-        assert result.method == "websocket", \
-            f"Expected websocket method, got {result.method}"
-        
         # Verify results
-        assert result.responses_received == 15
+        assert len(results) == 15
+        for cmd_result in results:
+            assert cmd_result.exit_code == 0
         
         print("✓ Forced WebSocket mode successful")
     
@@ -283,19 +266,13 @@ class TestThunderboltSharedDirectory:
             })
         
         # Execute batched commands
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         
-        # Verify execution method using typed response
-        assert result.method == "shared_directory", \
-            f"Expected shared_directory method for batched"
-        
-        # Verify results using typed response
-        assert result.total_commands == 15
-        assert result.total_nodes == 15
-        assert len(result.results) == 15
+        # Verify results - API returns List[CommandResult]
+        assert len(results) == 15
         
         # Check each command result in order
-        for i, cmd_result in enumerate(result.results):
+        for i, cmd_result in enumerate(results):
             expected_hostname = all_hostnames[i]
             expected_output = f"Batch command {i}"
             
@@ -322,11 +299,11 @@ class TestThunderboltSharedDirectory:
     
     def test_batched_multiple_commands_per_node(self, thunderbolt_shared_dir_cluster):
         """
-        Test multiple batched commands for the same node.
+        Test multiple batched commands for the same node via shared directory.
         """
         api = thunderbolt_shared_dir_cluster.get_api()
         
-        print("Test: Multiple batched commands per node...")
+        print("Test: Multiple batched commands per node via shared dir...")
         
         # Get first 3 nodes
         all_hostnames = api.get_node_hostnames()
@@ -346,15 +323,13 @@ class TestThunderboltSharedDirectory:
                 expected_results.append((hostname, msg))
         
         # Execute batched commands
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         
-        # Verify results using typed response
-        assert result.total_commands == 9  # 3 nodes * 3 commands
-        assert result.total_nodes == 3
-        assert len(result.results) == 9
+        # Verify results - API returns List[CommandResult]
+        assert len(results) == 9  # 3 nodes * 3 commands
         
         # Verify order preservation and content
-        for i, cmd_result in enumerate(result.results):
+        for i, cmd_result in enumerate(results):
             expected_hostname, expected_msg = expected_results[i]
             
             print(f"Command {i}: node={cmd_result.node}, expected={expected_hostname}")
@@ -366,7 +341,7 @@ class TestThunderboltSharedDirectory:
             assert expected_msg in (cmd_result.stdout or ""), \
                 f"Expected '{expected_msg}' in stdout"
         
-        print("✓ Multiple batched commands per node successful")
+        print("✓ Multiple batched commands per node successful via shared dir")
     
     def test_shared_dir_timeout_handling(self, thunderbolt_shared_dir_cluster):
         """
@@ -381,7 +356,7 @@ class TestThunderboltSharedDirectory:
         target_nodes = all_hostnames[:5]
         
         # Execute command with short timeout
-        result = api.run_command(
+        results = api.run_command(
             command="sleep 20",
             nodes=target_nodes,
             timeout=2,  # 2 second timeout for 20 second sleep
@@ -389,13 +364,15 @@ class TestThunderboltSharedDirectory:
         )
         
         # Check that nodes reported timeout
-        for hostname, node_result in result.results.items():
-            print(f"Node {hostname} timeout result: {node_result}")
-            assert node_result.get("success") is False, \
-                f"Expected failure for timeout on {hostname}"
-            assert "error" in node_result
-            assert "timed out" in node_result["error"].lower() or \
-                   "timeout" in node_result["error"].lower()
+        for cmd_result in results:
+            print(f"Node {cmd_result.node} timeout result: exit_code={cmd_result.exit_code}, "
+                  f"error={cmd_result.error}, timed_out={cmd_result.timed_out}")
+            # Timeout should be reported
+            has_error = cmd_result.timed_out is True or cmd_result.error is not None
+            assert has_error, f"Expected timeout/error for {cmd_result.node}"
+            if cmd_result.error:
+                assert "timed out" in cmd_result.error.lower() or \
+                       "timeout" in cmd_result.error.lower()
         
         print("✓ Timeout handling in broadcast mode verified")
     
@@ -411,7 +388,7 @@ class TestThunderboltSharedDirectory:
         all_hostnames = api.get_node_hostnames()
         
         # Execute command that returns error
-        result = api.run_command(
+        results = api.run_command(
             command="exit 42",
             nodes=all_hostnames,
             timeout=10,
@@ -419,12 +396,11 @@ class TestThunderboltSharedDirectory:
         )
         
         # Check that nodes reported non-zero exit code
-        for hostname, node_result in result.results.items():
-            print(f"Node {hostname} error result: {node_result}")
-            assert node_result.get("success") is True, \
-                "Command should execute successfully even with non-zero exit"
-            assert node_result.get("exit_code") == 42, \
-                f"Expected exit_code 42, got {node_result.get('exit_code')}"
+        for cmd_result in results:
+            print(f"Node {cmd_result.node} error result: exit_code={cmd_result.exit_code}")
+            # Command executes successfully but with non-zero exit
+            assert cmd_result.exit_code == 42, \
+                f"Expected exit_code 42, got {cmd_result.exit_code}"
         
         print("✓ Error handling in broadcast mode verified")
     
@@ -442,7 +418,7 @@ class TestThunderboltSharedDirectory:
         all_hostnames = api.get_node_hostnames()
         
         # Execute a command
-        result = api.run_command(
+        results = api.run_command(
             command="echo 'Cleanup test'",
             nodes=all_hostnames,
             timeout=10,
@@ -499,17 +475,17 @@ class TestThunderboltSharedDirectory:
             results1 = future1.result()
             results2 = future2.result()
         
-        # Verify both jobs completed successfully using typed responses
-        assert results1.responses_received == len(group1)
-        assert results2.responses_received == len(group2)
+        # Verify both jobs completed successfully
+        assert len(results1) == len(group1)
+        assert len(results2) == len(group2)
         
-        for hostname, node_result in results1.results.items():
-            assert node_result.get("success") is True
-            assert "Group 1 test" in node_result.get("stdout", "")
+        for cmd_result in results1:
+            assert cmd_result.exit_code == 0
+            assert "Group 1 test" in (cmd_result.stdout or "")
         
-        for hostname, node_result in results2.results.items():
-            assert node_result.get("success") is True
-            assert "Group 2 test" in node_result.get("stdout", "")
+        for cmd_result in results2:
+            assert cmd_result.exit_code == 0
+            assert "Group 2 test" in (cmd_result.stdout or "")
         
         print("✓ Concurrent job execution successful")
     
@@ -534,8 +510,7 @@ class TestThunderboltSharedDirectory:
             force_method="websocket"
         )
         
-        assert results_ws.method == "websocket"
-        assert results_ws.responses_received == 10
+        assert len(results_ws) == 10
         
         # Execute via shared directory (forced)
         results_sd = api.run_command(
@@ -546,16 +521,16 @@ class TestThunderboltSharedDirectory:
             force_method="shared_dir"
         )
         
-        assert results_sd.method == "shared_directory"
-        assert results_sd.responses_received == 10
+        assert len(results_sd) == 10
         
         # Verify both worked correctly
-        for hostname in target_nodes:
-            assert results_ws.results[hostname].get("success") is True
-            assert "WebSocket test" in results_ws.results[hostname].get("stdout", "")
-            
-            assert results_sd.results[hostname].get("success") is True
-            assert "Shared dir test" in results_sd.results[hostname].get("stdout", "")
+        for cmd_result in results_ws:
+            assert cmd_result.exit_code == 0
+            assert "WebSocket test" in (cmd_result.stdout or "")
+        
+        for cmd_result in results_sd:
+            assert cmd_result.exit_code == 0
+            assert "Shared dir test" in (cmd_result.stdout or "")
         
         print("✓ Hybrid operation successful")
     
@@ -593,15 +568,15 @@ class TestThunderboltSharedDirectory:
                     "use_sudo": False
                 })
         
-        result = api.run_batched_commands(commands)
+        results = api.run_batched_commands(commands)
         print("Fast commands to", target_nodes[:5], "slow to", target_nodes[5:])
         
-        # Check that we got results from all nodes using typed response
-        assert len(result.results) == 10
+        # Check that we got results from all nodes
+        assert len(results) == 10
         
         # First 5 should succeed
         for i in range(5):
-            cmd_result = result.results[i]
+            cmd_result = results[i]
             
             assert cmd_result.node == target_nodes[i]
             assert cmd_result.exit_code == 0 or not cmd_result.error
@@ -609,16 +584,57 @@ class TestThunderboltSharedDirectory:
         
         # Last 5 should timeout
         for i in range(5, 10):
-            cmd_result = result.results[i]
+            cmd_result = results[i]
             
             assert cmd_result.node == target_nodes[i]
-            assert cmd_result.error or cmd_result.timed_out, \
-                f"Expected timeout for command {i}"
+            # Check for timeout or error
+            has_timeout = cmd_result.error or cmd_result.timed_out
+            assert has_timeout, \
+                f"Expected timeout for command {i}, got: error={cmd_result.error}, timed_out={cmd_result.timed_out}"
             if cmd_result.error:
                 assert "timed out" in cmd_result.error.lower() or \
                        "timeout" in cmd_result.error.lower()
         
         print("✓ Partial node completion handled correctly")
+    
+    def test_batched_commands_sequential_per_node(self, thunderbolt_shared_dir_cluster):
+        """
+        Test that batched commands on the same node execute sequentially.
+        """
+        api = thunderbolt_shared_dir_cluster.get_api()
+        
+        print("Test: Batched commands sequential per node...")
+        
+        # Get first node
+        all_hostnames = api.get_node_hostnames()
+        node1 = all_hostnames[0]
+        
+        # Create multiple commands for same node with sleep
+        commands = [
+            {"node": node1, "command": "sleep 1 && echo 'Command 1'", "timeout": 5},
+            {"node": node1, "command": "sleep 1 && echo 'Command 2'", "timeout": 5},
+            {"node": node1, "command": "sleep 1 && echo 'Command 3'", "timeout": 5},
+        ]
+        
+        start_time = time.time()
+        results = api.run_batched_commands(commands)
+        elapsed_time = time.time() - start_time
+        
+        print(f"Elapsed time: {elapsed_time:.2f} seconds")
+        
+        # Verify all succeeded in order
+        assert len(results) == 3
+        for i, cmd_result in enumerate(results, 1):
+            assert cmd_result.exit_code == 0
+            assert f"Command {i}" in (cmd_result.stdout or "")
+        
+        # Should take ~3 seconds (sequential)
+        assert elapsed_time >= 3.0, \
+            f"Too fast ({elapsed_time:.2f}s), may have run in parallel"
+        assert elapsed_time < 5.0, \
+            f"Too slow ({elapsed_time:.2f}s)"
+        
+        print("✓ Batched commands executed sequentially on same node")
 
 
 if __name__ == "__main__":

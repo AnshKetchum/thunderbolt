@@ -3,6 +3,7 @@ from time import perf_counter
 from .command_executor import CommandExecutor
 from .response_models import CommandResult
 
+
 class BatchExecutor:
     """Executes batches of commands sequentially."""
     
@@ -16,7 +17,7 @@ class BatchExecutor:
         command_id: str,
         commands: list
     ) -> list[CommandResult]:
-        """Execute a batch of commands sequentially and return list of results."""
+        """Execute a batch of commands sequentially and return batch result."""
         batch_start = datetime.now()
         batch_start_perf = perf_counter()
         print(f"[BatchExecutor] [{self.hostname}] Starting batch {command_id} with {len(commands)} commands")
@@ -27,14 +28,15 @@ class BatchExecutor:
             command = cmd_spec.get("command")
             timeout = cmd_spec.get("timeout", 30)
             use_sudo = cmd_spec.get("use_sudo", False)
+            command_uuid = cmd_spec.get("command_uuid")  # Get UUID from spec
             
             print(
                 f"[BatchExecutor] [{self.hostname}] "
-                f"[{idx+1}/{len(commands)}] Executing: {command[:50]}... (timeout={timeout}s)"
+                f"[{idx+1}/{len(commands)}] Executing: {command[:50]}... (timeout={timeout}s, uuid={command_uuid})"
             )
             
             cmd_result: CommandResult = await self.executor.execute(
-                command_id=f"{command_id}_sub_{idx}",
+                command_id=command_uuid,  # Use the UUID from master
                 command=command,
                 timeout=timeout,
                 use_sudo=use_sudo,

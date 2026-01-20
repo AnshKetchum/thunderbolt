@@ -55,17 +55,12 @@ class WebSocketHandlers:
             # NO LOCK NEEDED - just reading messages
             async for message in websocket:
                 data = json.loads(message)
+                msg_type = data.get("type")
                 
-                if data.get("type") == "command_result":
-                    command_id = data.get("command_id")
-                    # NO LOCK - pending_commands dict writes are single-threaded per command_id
-                    if command_id in self.pending_commands:
-                        pending = self.pending_commands[command_id]
-                        pending["responses"][hostname] = data
-                        pending["received"] += 1
-                        
-                        if pending["received"] >= pending["total_nodes"]:
-                            pending["event"].set()
+                if msg_type == "command_result":
+                    await self._handle_command_result(data, hostname)
+                elif msg_type == "batch_result":
+                    await self._handle_batch_result(data, hostname)
         
         except websockets.exceptions.ConnectionClosed:
             print(f"[Thunderbolt] Slave command channel disconnected: {hostname}")
@@ -83,6 +78,41 @@ class WebSocketHandlers:
                         if not self.slaves[hostname].get("health_ws"):
                             del self.slaves[hostname]
                             print(f"[Thunderbolt] Removed slave: {hostname}")
+    
+    async def _handle_command_result(self, data: dict, hostname: str):
+        """Handle incoming command result from slave."""
+        command_id = data.get("command_id")
+        # NO LOCK - pending_commands dict writes are single-threaded per command_id
+        if command_id in self.pending_commands:
+            pending = self.pending_commands[command_id]
+            pending["responses"][hostname] = data
+            pending["received"] += 1
+            
+            if pending["received"] >= pending["total_nodes"]:
+                pending["event"].set()
+    
+    async def _handle_batch_result(self, data: dict, hostname: str):
+        """Handle incoming batch result from slave."""
+        command_id = data.get("command_id")
+        
+        if command_id not in self.pending_commands:
+            print(f"[Thunderbolt] Received batch result for unknown command_id: {command_id}")
+            return
+        
+        pending = self.pending_commands[command_id]
+        
+        # Store the batch response (contains "results" array)
+        pending["responses"][hostname] = {
+            "results": data.get("results", [])
+        }
+        pending["received"] += 1
+        
+        print(f"[Thunderbolt] Batch result received from {hostname}: {pending['received']}/{pending['total_nodes']}")
+        
+        # Check if all responses received
+        if pending["received"] >= pending["total_nodes"]:
+            print(f"[Thunderbolt] All batch results received for {command_id}")
+            pending["event"].set()
     
     async def handle_health_connection(self, websocket):
         """Handle incoming slave health check connections."""

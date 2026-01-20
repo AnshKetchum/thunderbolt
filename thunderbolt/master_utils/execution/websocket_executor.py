@@ -99,93 +99,118 @@ class WebSocketExecutor:
         return results
 
     async def execute_batched(self, command_specs: List[dict]) -> List[CommandResult]:
-        """Execute batched commands via websocket, maintaining input order."""
-        print("Sending command via batched api")
+        """Execute batched commands via websocket using batched_command message type."""
+        print("Sending command via batched API")
         
-        async def execute_single_command(cmd_spec: dict) -> CommandResult:
-            """Execute a single command and return a CommandResult."""
-            command_uuid = cmd_spec["command_uuid"]
-            hostname = cmd_spec["node"]
-            command = cmd_spec["command"]
-            timeout = cmd_spec["timeout"]
-            use_sudo = cmd_spec["use_sudo"]
+        # Group commands by node
+        node_commands = {}
+        spec_lookup = {}  # Map (node, command_index) to original spec
+        
+        for spec in command_specs:
+            hostname = spec["node"]
+            if hostname not in node_commands:
+                node_commands[hostname] = []
             
-            slave_info = self.slaves.get(hostname)
-            
-            if not slave_info or not slave_info.get("command_ws"):
-                return CommandResult(
-                    command_uuid=command_uuid,
-                    node=hostname,
-                    command=command,
-                    error=f"Node {hostname} not connected",
-                    timed_out=False
-                )
-            
-            command_id = str(uuid.uuid4())
-            
-            self.pending_commands[command_id] = {
-                "responses": {},
-                "total_nodes": 1,
-                "received": 0,
-                "event": asyncio.Event()
+            cmd_entry = {
+                "command": spec["command"],
+                "timeout": spec["timeout"],
+                "use_sudo": spec["use_sudo"],
+                "command_uuid": spec["command_uuid"]
             }
             
-            command_msg = json.dumps({
-                "type": "command",
-                "command_id": command_id,
-                "command": command,
-                "timeout": timeout,
-                "use_sudo": use_sudo
-            })
-            
-            try:
-                async with self._send_semaphore:
-                    await slave_info["command_ws"].send(command_msg)
-                
-                await asyncio.wait_for(
-                    self.pending_commands[command_id]["event"].wait(),
-                    timeout=max(timeout + 5, 60)
-                )
-                
-                result = self.pending_commands[command_id]["responses"].get(hostname, {})
-                print(f"Command {command}: result {result}") 
-                
-                return CommandResult(
-                    command_uuid=command_uuid,
-                    node=hostname,
-                    command=command,
-                    stdout=result.get("stdout"),
-                    stderr=result.get("stderr"),
-                    exit_code=result.get("exit_code"),
-                    error=result.get("error"),
-                    timed_out=result.get("timed_out")
-                )
-                
-            except asyncio.TimeoutError as e:
-                import traceback 
-                traceback.print_exc()
-                return CommandResult(
-                    command_uuid=command_uuid,
-                    node=hostname,
-                    command=command,
-                    error="Command timeout",
-                    timed_out=True
-                )
-            except Exception as e:
-                return CommandResult(
-                    command_uuid=command_uuid,
-                    node=hostname,
-                    command=command,
-                    error=f"Send failed: {str(e)}",
-                    timed_out=False
-                )
-            finally:
-                if command_id in self.pending_commands:
-                    del self.pending_commands[command_id]
+            node_commands[hostname].append(cmd_entry)
+            spec_lookup[(hostname, len(node_commands[hostname]) - 1)] = spec
         
-        # Execute all commands in parallel
-        tasks = [execute_single_command(cmd_spec) for cmd_spec in command_specs]
-        results = await asyncio.gather(*tasks)
+        # Generate a single batch command ID
+        batch_id = str(uuid.uuid4())
+        
+        # Track all nodes involved
+        all_nodes = list(node_commands.keys())
+        
+        self.pending_commands[batch_id] = {
+            "responses": {},
+            "total_nodes": len(all_nodes),
+            "received": 0,
+            "event": asyncio.Event()
+        }
+        
+        # Send batched command to each node
+        send_tasks = []
+        for hostname, commands in node_commands.items():
+            slave_info = self.slaves.get(hostname)
+            if slave_info and slave_info.get("command_ws"):
+                batch_msg = json.dumps({
+                    "type": "batched_command",
+                    "command_id": batch_id,
+                    "commands": commands
+                })
+                
+                send_tasks.append(
+                    self._send_with_semaphore(
+                        slave_info["command_ws"],
+                        batch_msg,
+                        hostname
+                    )
+                )
+        
+        send_results = await asyncio.gather(*send_tasks, return_exceptions=True)
+        
+        failed_sends = sum(1 for r in send_results if isinstance(r, Exception))
+        if failed_sends > 0:
+            print(f"[Thunderbolt] {failed_sends}/{len(send_tasks)} batched command sends failed")
+        
+        # Wait for all node responses
+        max_timeout = max((spec["timeout"] for spec in command_specs), default=30)
+        try:
+            await asyncio.wait_for(
+                self.pending_commands[batch_id]["event"].wait(),
+                timeout=max_timeout + 10
+            )
+        except asyncio.TimeoutError:
+            print(f"[Thunderbolt] Batch {batch_id} timed out waiting for responses")
+        
+        raw_responses = self.pending_commands[batch_id]["responses"]
+        
+        # Cleanup
+        del self.pending_commands[batch_id]
+        
+        # Build results in original input order
+        results: List[CommandResult] = []
+        for spec in command_specs:
+            hostname = spec["node"]
+            command_uuid = spec["command_uuid"]
+            command = spec["command"]
+            
+            # Find this command's result in the node's batch response
+            node_response = raw_responses.get(hostname, {})
+            command_results = node_response.get("results", [])
+            
+            # Match by command_uuid
+            cmd_result = None
+            for cr in command_results:
+                if cr.get("command_uuid") == command_uuid:
+                    cmd_result = cr
+                    break
+            
+            if cmd_result:
+                results.append(CommandResult(
+                    command_uuid=command_uuid,
+                    node=hostname,
+                    command=command,
+                    stdout=cmd_result.get("stdout"),
+                    stderr=cmd_result.get("stderr"),
+                    exit_code=cmd_result.get("exit_code"),
+                    error=cmd_result.get("error"),
+                    timed_out=cmd_result.get("timed_out", False)
+                ))
+            else:
+                results.append(CommandResult(
+                    command_uuid=command_uuid,
+                    node=hostname,
+                    command=command,
+                    error="No response received for this command",
+                    timed_out=True
+                ))
         
         return results
     

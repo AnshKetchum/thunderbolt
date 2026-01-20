@@ -59,8 +59,10 @@ class ThunderboltSlave:
             api_key=self.api_key,
             reconnect_interval=reconnect_interval,
             max_reconnect_attempts=max_reconnect_attempts,
-            command_executor=self.command_executor
+            command_executor=self.command_executor,
+            batch_executor=self.batch_executor  # Add this line
         )
+
         
         self.health_channel = HealthChannel(
             master_host=master_host,
