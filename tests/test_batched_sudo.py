@@ -15,7 +15,7 @@ from cluster_utils import ThunderboltTestCluster, logger
 @pytest.fixture(scope="function")
 def thunderbolt_cluster():
     """Pytest fixture that provides a thunderbolt test cluster."""
-    cluster = ThunderboltTestCluster(num_slaves=2)
+    cluster = ThunderboltTestCluster(num_slaves=2, privileged = True)
     
     try:
         cluster.setup()
@@ -24,7 +24,7 @@ def thunderbolt_cluster():
         cluster.teardown()
 
 
-class TestThunderboltBatchedCommands:
+class TestThunderboltBatchedCommandsPrivileged:
     """Test cases for the thunderbolt batched command execution."""
     
     def test_batched_single_command_per_node(self, thunderbolt_cluster):
@@ -154,6 +154,38 @@ class TestThunderboltBatchedCommands:
                 f"Unexpected output for command {i} on {node2}"
         
         logger.info("✓ Multiple commands per node batched execution successful")
+    
+    def test_batched_with_sudo(self, thunderbolt_cluster):
+        """
+        Test batched execution with sudo commands.
+        """
+        api = thunderbolt_cluster.get_api()
+        
+        all_hostnames = api.get_node_hostnames()
+        node1 = all_hostnames[0]
+        
+        logger.info("Test: Batched commands with sudo...")
+        
+        commands = [
+            {"node": node1, "command": "whoami", "timeout": 10, "use_sudo": False},
+            {"node": node1, "command": "whoami", "timeout": 10, "use_sudo": True},
+        ]
+        
+        results = api.run_batched_commands(commands)
+        
+        # Verify both commands executed
+        assert results["total_commands"] == 2
+        node_result = results["results"][node1]
+        assert len(node_result["commands"]) == 2
+        
+        # Both should succeed
+        for cmd_result in node_result["commands"]:
+            result = cmd_result["result"]
+            assert result["success"] is True, \
+                f"Command failed: {result.get('error')}"
+            assert result["exit_code"] == 0
+        
+        logger.info("✓ Batched sudo commands successful")
     
     def test_batched_with_timeouts(self, thunderbolt_cluster):
         """

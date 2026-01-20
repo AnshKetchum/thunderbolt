@@ -19,7 +19,8 @@ class ThunderboltTestCluster:
         num_slaves: int = 2,
         shared_dir: Optional[str] = None,
         shared_dir_threshold: int = 10,
-        shared_dir_poll_interval: float = 0.5
+        shared_dir_poll_interval: float = 0.5,
+        privileged: bool = False,
     ):
         self.client = docker.from_env()
         self.num_slaves = num_slaves
@@ -31,6 +32,7 @@ class ThunderboltTestCluster:
         self.api_port = 8001
         self.master_host = "thunderbolt-master"
         self.api = None
+        self.privileged = privileged
         
         # Shared directory configuration
         self.shared_dir = shared_dir
@@ -164,6 +166,10 @@ class ThunderboltTestCluster:
                 "--shared-dir", self.shared_dir_container_path,
                 "--shared-dir-poll-interval", str(self.shared_dir_poll_interval)
             ])
+        if self.privileged:
+            command.extend([
+                "--allow-privileged-execution"
+            ])
         
         # Prepare container config
         container_config = {
@@ -175,7 +181,8 @@ class ThunderboltTestCluster:
             "remove": True,
             "environment": {
                 "PYTHONUNBUFFERED": "1"
-            }
+            },
+            "privileged": self.privileged
         }
         
         # Add volume mount if shared directory configured

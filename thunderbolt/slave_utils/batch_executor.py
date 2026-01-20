@@ -5,9 +5,10 @@ from .command_executor import CommandExecutor
 class BatchExecutor:
     """Executes batches of commands sequentially."""
     
-    def __init__(self, hostname: str):
+    def __init__(self, hostname: str, privileged: bool):
         self.hostname = hostname
-        self.executor = CommandExecutor(hostname)
+        self.privileged = privileged
+        self.executor = CommandExecutor(hostname, privileged)
     
     async def execute_batch(
         self,

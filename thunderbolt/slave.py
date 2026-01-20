@@ -27,7 +27,8 @@ class ThunderboltSlave:
         reconnect_interval: int = 5,
         max_reconnect_attempts: int = -1,
         shared_dir: Optional[str] = None,
-        shared_dir_poll_interval: float = 0.5
+        shared_dir_poll_interval: float = 0.5,
+        privileged_execution: bool = False
     ):
         self.master_host = master_host
         self.command_port = command_port
@@ -36,10 +37,11 @@ class ThunderboltSlave:
         self.hostname = hostname or socket.gethostname()
         self.reconnect_interval = reconnect_interval
         self.max_reconnect_attempts = max_reconnect_attempts
+        self.privileged_execution = privileged_execution
         
         # Initialize components
-        self.command_executor = CommandExecutor(self.hostname)
-        self.batch_executor = BatchExecutor(self.hostname)
+        self.command_executor = CommandExecutor(self.hostname, privileged_execution)
+        self.batch_executor = BatchExecutor(self.hostname, privileged_execution)
         
         # Shared directory components
         self.dir_manager = None

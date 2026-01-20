@@ -2,12 +2,12 @@ import asyncio
 from datetime import datetime
 from time import perf_counter
 
-
 class CommandExecutor:
     """Executes shell commands with timeout support."""
     
-    def __init__(self, hostname: str):
+    def __init__(self, hostname: str, privileged: bool):
         self.hostname = hostname
+        self.privileged = privileged
     
     async def _kill_process(self, process, grace_timeout: float = 2.0):
         """
@@ -79,12 +79,36 @@ class CommandExecutor:
         print(f"[CommandExecutor] [{self.hostname}] [{command_id}] Command: {cmd_display}")
         print(f"[CommandExecutor] [{self.hostname}] [{command_id}] Timeout: {timeout}s")
         print(f"[CommandExecutor] [{self.hostname}] [{command_id}] Use sudo: {use_sudo}")
+        print(f"[CommandExecutor] [{self.hostname}] [{command_id}] Privileged: {self.privileged}")
         
         result = {
             "command_id": command_id,
             "command": command,
             "execution_start": start_time.isoformat()
         }
+        
+        # Check privilege requirements
+        if use_sudo and not self.privileged:
+            end_time = datetime.now()
+            end_perf = perf_counter()
+            duration = round(end_perf - start_perf, 3)
+            
+            error_msg = "Cannot execute sudo command: executor not privileged"
+            print(f"[CommandExecutor] [{self.hostname}] [{command_id}] ✗ PERMISSION DENIED: {error_msg}")
+            
+            result.update({
+                "success": False,
+                "error": error_msg,
+                "execution_end": end_time.isoformat(),
+                "execution_duration_seconds": duration
+            })
+            
+            print(f"[CommandExecutor] [{self.hostname}] [{command_id}] ✗ Final result:")
+            print(f"[CommandExecutor] [{self.hostname}] [{command_id}]   - Success: {result.get('success')}")
+            print(f"[CommandExecutor] [{self.hostname}] [{command_id}]   - Duration: {result.get('execution_duration_seconds')}s")
+            print(f"[CommandExecutor] [{self.hostname}] [{command_id}]   - Error: {result.get('error')}")
+            
+            return result
         
         process = None
         
@@ -118,6 +142,12 @@ class CommandExecutor:
                 print(f"[CommandExecutor] [{self.hostname}] [{command_id}] Stdout length: {len(stdout)} bytes")
                 print(f"[CommandExecutor] [{self.hostname}] [{command_id}] Stderr length: {len(stderr)} bytes")
                 
+                # Print stderr content if non-empty
+                if len(stderr) > 0:
+                    stderr_text = stderr.decode('utf-8', errors='replace')
+                    print(f"[CommandExecutor] [{self.hostname}] [{command_id}] Stderr content:")
+                    print(f"[CommandExecutor] [{self.hostname}] [{command_id}] {stderr_text}")
+                
                 result.update({
                     "success": True,
                     "exit_code": process.returncode,
@@ -146,7 +176,7 @@ class CommandExecutor:
                 })
                 
                 print(f"[CommandExecutor] [{self.hostname}] [{command_id}] Timeout result prepared: success={result['success']}, error='{result['error']}'")
-        
+                
         except asyncio.CancelledError:
             # Task was cancelled - clean up and re-raise
             end_time = datetime.now()
@@ -167,7 +197,7 @@ class CommandExecutor:
             
             print(f"[CommandExecutor] [{self.hostname}] [{command_id}] Re-raising CancelledError")
             raise  # Re-raise CancelledError
-        
+            
         except Exception as e:
             # Unexpected error during execution
             end_time = datetime.now()

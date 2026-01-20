@@ -1,3 +1,4 @@
 thunderbolt.egg-info
 build
 __pycache__
+test_docker_logs

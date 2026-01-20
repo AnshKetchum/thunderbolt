@@ -186,6 +186,12 @@ def slave_cli():
         default=0.5,
         help="Interval (seconds) for polling shared directory for new jobs"
     )
+    parser.add_argument("--allow-privileged-execution", 
+                    action="store_true", 
+                    default=False, 
+                    help="Allow sudo access to the remote executor")
+
+
     
     args = parser.parse_args()
     
@@ -220,7 +226,8 @@ def slave_cli():
         reconnect_interval=args.reconnect_interval,
         max_reconnect_attempts=args.max_reconnect_attempts,
         shared_dir=args.shared_dir,
-        shared_dir_poll_interval=args.shared_dir_poll_interval
+        shared_dir_poll_interval=args.shared_dir_poll_interval,
+        privileged_execution=args.allow_privileged_execution
     )
     
     try:
