@@ -2,6 +2,7 @@ import asyncio
 import json
 import websockets
 from .base import BaseChannel
+from .response_models import CommandResult
 
 
 class CommandChannel(BaseChannel):
@@ -59,15 +60,19 @@ class CommandChannel(BaseChannel):
             timeout=timeout,
             use_sudo=use_sudo
         )
+        print(f"[Command Channel]: Got result {result}")
         
         # Add metadata
-        result.update({
+        payload = result.model_dump()
+
+        payload.update({
             "type": "command_result",
-            "hostname": self.hostname
+            "hostname": self.hostname,
+            "command_id":  command_id
         })
         
         # Send result back to master
         try:
-            await websocket.send(json.dumps(result))
+            await websocket.send(json.dumps(payload))
         except Exception as e:
             print(f"[Command] Failed to send result: {e}")

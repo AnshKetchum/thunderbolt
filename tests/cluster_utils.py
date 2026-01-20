@@ -204,9 +204,9 @@ class ThunderboltTestCluster:
             try:
                 # Try to get master health using temporary API client
                 temp_api = ThunderboltAPI(host="localhost", port=self.api_port)
-                health_data = temp_api.health()
+                health = temp_api.health()
                 temp_api.close()
-                print(f"Master health check: {health_data}")
+                print(f"Master health check: status={health.status}, slaves={health.connected_slaves}")
                 return
             except Exception as e:
                 logger.debug(f"Waiting for master: {e}")
@@ -231,18 +231,18 @@ class ThunderboltTestCluster:
         
         while time.time() - start_time < timeout:
             try:
-                nodes_data = self.api.list_nodes()
-                connected_slaves = nodes_data.get("total", 0)
-                nodes = nodes_data.get("nodes", [])
+                nodes_response = self.api.list_nodes()
+                connected_slaves = nodes_response.total
                 
                 # Count fully connected slaves (both channels)
                 fully_connected = sum(
-                    1 for node in nodes 
-                    if node.get('command_connected') and node.get('health_connected')
+                    1 for node in nodes_response.nodes 
+                    if node.command_connected and node.health_connected
                 )
                 
                 if fully_connected >= self.num_slaves:
-                    print(f"All slaves fully connected: {[n['hostname'] for n in nodes]}")
+                    hostnames = [node.hostname for node in nodes_response.nodes]
+                    print(f"All slaves fully connected: {hostnames}")
                     
                     # If using shared directory, verify slave directories were created
                     if self.shared_dir:
@@ -286,14 +286,13 @@ class ThunderboltTestCluster:
         
         # Check slave directories exist (with a small delay for filesystem sync)
         time.sleep(1)
-        nodes_data = self.api.list_nodes()
-        for node in nodes_data.get("nodes", []):
-            hostname = node["hostname"]
-            node_dir = shared_path / hostname
+        nodes_response = self.api.list_nodes()
+        for node in nodes_response.nodes:
+            node_dir = shared_path / node.hostname
             if not node_dir.exists():
-                logger.warning(f"Node directory not found for {hostname}")
+                logger.warning(f"Node directory not found for {node.hostname}")
             else:
-                logger.debug(f"Verified node directory for {hostname}")
+                logger.debug(f"Verified node directory for {node.hostname}")
     
     def _save_container_logs(self, container_name: str, logs: str):
         """Save container logs to debug directory if debug mode is enabled."""

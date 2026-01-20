@@ -42,30 +42,30 @@ class TestThunderboltProtocol:
         
         # Test 1: Verify master is accessible
         logger.info("Test 1: Verifying master is accessible...")
-        health_data = api.health()
-        assert health_data["status"] == "healthy", "Master not healthy"
-        assert health_data["connected_slaves"] == 2, "Expected 2 connected slaves"
-        logger.info(f"✓ Master is accessible: {health_data}")
+        health = api.health()
+        print("Health status ", health)
+        assert health.status == "healthy", "Master not healthy"
+        assert health.connected_slaves == 2, "Expected 2 connected slaves"
+        logger.info(f"✓ Master is accessible: {health.dict()}")
         
         # Test 2: Verify slaves are connected (both channels)
         logger.info("Test 2: Verifying slaves are fully connected...")
-        nodes_data = api.list_nodes()
-        assert nodes_data["total"] == 2, f"Expected 2 slaves, got {nodes_data['total']}"
+        nodes_response = api.list_nodes()
+        assert nodes_response.total == 2, f"Expected 2 slaves, got {nodes_response.total}"
         
-        nodes = nodes_data["nodes"]
-        node_hostnames = [node["hostname"] for node in nodes]
+        node_hostnames = [node.hostname for node in nodes_response.nodes]
         
         # Verify both channels are connected for each node
-        for node in nodes:
-            assert node["command_connected"], f"Node {node['hostname']} command channel not connected"
-            assert node["health_connected"], f"Node {node['hostname']} health channel not connected"
-            logger.info(f"✓ Node {node['hostname']}: CMD=✓ HEALTH=✓")
+        for node in nodes_response.nodes:
+            assert node.command_connected, f"Node {node.hostname} command channel not connected"
+            assert node.health_connected, f"Node {node.hostname} health channel not connected"
+            logger.info(f"✓ Node {node.hostname}: CMD=✓ HEALTH=✓")
         
         logger.info(f"✓ Connected nodes: {node_hostnames}")
         
         # Test 3: Execute a dummy command on all slaves
         logger.info("Test 3: Executing dummy command on all slaves...")
-        results = api.run_command(
+        result = api.run_command(
             command="echo 'Hello from thunderbolt test!'",
             nodes=node_hostnames,
             timeout=10,
@@ -74,29 +74,26 @@ class TestThunderboltProtocol:
         
         # Test 4: Verify results
         logger.info("Test 4: Verifying command results...")
-        assert "results" in results, "Response missing 'results' field"
-        assert results["total_nodes"] == 2, "Expected 2 target nodes"
-        assert results["responses_received"] == 2, "Expected 2 responses"
-        assert results.get("failed_sends", 0) == 0, "Expected 0 failed sends"
+        assert result.total_nodes == 2, "Expected 2 target nodes"
+        assert result.responses_received == 2, "Expected 2 responses"
+        assert result.failed_sends == 0, "Expected 0 failed sends"
         
-        slave_results = results["results"]
-        assert len(slave_results) == 2, f"Expected results from 2 slaves, got {len(slave_results)}"
+        assert len(result.results) == 2, f"Expected results from 2 slaves, got {len(result.results)}"
         
-        # Check each slave's result (new format)
+        # Check each slave's result
         for hostname in node_hostnames:
-            assert hostname in slave_results, f"Missing result from {hostname}"
-            result = slave_results[hostname]
+            assert hostname in result.results, f"Missing result from {hostname}"
+            slave_result = result.results[hostname]
             
-            logger.info(f"Slave {hostname} result: success={result.get('success')}, "
-                       f"exit_code={result.get('exit_code')}, "
-                       f"stdout={result.get('stdout', '')[:50]}")
+            logger.info(f"Slave {hostname} result: success={slave_result.get('success')}, "
+                       f"exit_code={slave_result.get('exit_code')}, "
+                       f"stdout={slave_result.get('stdout', '')[:50]}")
             
-            # New format uses 'success' boolean instead of 'status' string
-            assert result.get("success") is True, \
-                f"Slave {hostname} execution failed: {result.get('error', 'Unknown error')}"
-            assert result.get("exit_code") == 0, \
+            assert slave_result.get("success") is True, \
+                f"Slave {hostname} execution failed: {slave_result.get('error', 'Unknown error')}"
+            assert slave_result.get("exit_code") == 0, \
                 f"Slave {hostname} returned non-zero exit code"
-            assert "Hello from thunderbolt test!" in result.get("stdout", ""), \
+            assert "Hello from thunderbolt test!" in slave_result.get("stdout", ""), \
                 f"Unexpected output from slave {hostname}"
         
         logger.info("✓ All tests passed!")
@@ -114,22 +111,17 @@ class TestThunderboltProtocol:
         logger.info("Testing dual-channel architecture...")
         
         # Get node info
-        nodes_data = api.list_nodes()
-        nodes = nodes_data["nodes"]
+        nodes_response = api.list_nodes()
         
         # Verify both channels for each node
-        for node in nodes:
-            hostname = node["hostname"]
-            cmd_connected = node.get("command_connected", False)
-            health_connected = node.get("health_connected", False)
-            failed_checks = node.get("failed_healthchecks", 0)
+        for node in nodes_response.nodes:
+            logger.info(f"Node {node.hostname}: CMD={node.command_connected}, "
+                       f"HEALTH={node.health_connected}, "
+                       f"failed_healthchecks={node.failed_healthchecks}")
             
-            logger.info(f"Node {hostname}: CMD={cmd_connected}, HEALTH={health_connected}, "
-                       f"failed_healthchecks={failed_checks}")
-            
-            assert cmd_connected, f"Command channel not connected for {hostname}"
-            assert health_connected, f"Health channel not connected for {hostname}"
-            assert failed_checks == 0, f"Health checks failing for {hostname}"
+            assert node.command_connected, f"Command channel not connected for {node.hostname}"
+            assert node.health_connected, f"Health channel not connected for {node.hostname}"
+            assert node.failed_healthchecks == 0, f"Health checks failing for {node.hostname}"
         
         logger.info("✓ Dual-channel architecture verified")
     
@@ -146,7 +138,7 @@ class TestThunderboltProtocol:
         target_node = all_hostnames[0]
         logger.info(f"Executing command on specific node: {target_node}")
         
-        results = api.run_command(
+        result = api.run_command(
             command="echo 'Specific node test'",
             nodes=[target_node],
             timeout=10,
@@ -154,16 +146,16 @@ class TestThunderboltProtocol:
         )
         
         # Should only have one result
-        assert results["total_nodes"] == 1
-        assert results["responses_received"] == 1
-        assert results.get("failed_sends", 0) == 0
-        assert target_node in results["results"]
+        assert result.total_nodes == 1
+        assert result.responses_received == 1
+        assert result.failed_sends == 0
+        assert target_node in result.results
         
-        # Verify the result is successful (new format)
-        result = results["results"][target_node]
-        assert result["success"] is True, f"Command failed: {result.get('error')}"
-        assert result["exit_code"] == 0
-        assert "Specific node test" in result["stdout"]
+        # Verify the result is successful
+        node_result = result.results[target_node]
+        assert node_result["success"] is True, f"Command failed: {node_result.get('error')}"
+        assert node_result["exit_code"] == 0
+        assert "Specific node test" in node_result["stdout"]
         
         logger.info("✓ Specific node execution successful")
     
@@ -202,21 +194,21 @@ class TestThunderboltProtocol:
         
         logger.info("Executing command with timeout...")
         
-        results = api.run_command(
+        result = api.run_command(
             command="sleep 10",
             nodes=all_hostnames,
             timeout=2,  # 2 second timeout for a 10 second sleep
             use_sudo=False
         )
         
-        # Check that slaves reported timeout (new format: success=False with error)
-        for hostname, result in results["results"].items():
-            logger.info(f"Slave {hostname} timeout result: {result}")
-            assert result["success"] is False, \
+        # Check that slaves reported timeout
+        for hostname, node_result in result.results.items():
+            logger.info(f"Slave {hostname} timeout result: {node_result}")
+            assert node_result["success"] is False, \
                 f"Expected failure for timeout, got success=True"
-            assert "error" in result, "Expected error field in timeout result"
-            assert "timed out" in result["error"].lower() or "timeout" in result["error"].lower(), \
-                f"Expected timeout message in error, got: {result['error']}"
+            assert "error" in node_result, "Expected error field in timeout result"
+            assert "timed out" in node_result["error"].lower() or "timeout" in node_result["error"].lower(), \
+                f"Expected timeout message in error, got: {node_result['error']}"
         
         logger.info("✓ Command timeout handled correctly")
     
@@ -231,22 +223,22 @@ class TestThunderboltProtocol:
         
         logger.info("Executing command that will fail...")
         
-        results = api.run_command(
+        result = api.run_command(
             command="exit 1",  # Command that returns error
             nodes=all_hostnames,
             timeout=10,
             use_sudo=False
         )
         
-        # Check that slaves reported error (new format: success=True but exit_code != 0)
-        for hostname, result in results["results"].items():
-            logger.info(f"Slave {hostname} error result: {result}")
+        # Check that slaves reported error
+        for hostname, node_result in result.results.items():
+            logger.info(f"Slave {hostname} error result: {node_result}")
             
             # Command executed successfully but returned non-zero exit code
-            assert result["success"] is True, \
+            assert node_result["success"] is True, \
                 "Command should execute successfully even with non-zero exit"
-            assert result["exit_code"] == 1, \
-                f"Expected exit_code 1, got {result['exit_code']}"
+            assert node_result["exit_code"] == 1, \
+                f"Expected exit_code 1, got {node_result['exit_code']}"
         
         logger.info("✓ Command error handled correctly")
     
@@ -258,7 +250,7 @@ class TestThunderboltProtocol:
         
         logger.info("Testing run_on_all_nodes convenience method...")
         
-        results = api.run_on_all_nodes(
+        result = api.run_on_all_nodes(
             command="echo 'Testing all nodes'",
             timeout=10,
             use_sudo=False,
@@ -266,15 +258,15 @@ class TestThunderboltProtocol:
         )
         
         # Verify we got results from all nodes
-        assert results["total_nodes"] == 2
-        assert results["responses_received"] == 2
-        assert results.get("failed_sends", 0) == 0
+        assert result.total_nodes == 2
+        assert result.responses_received == 2
+        assert result.failed_sends == 0
         
-        # Check all results are successful (new format)
-        for hostname, result in results["results"].items():
-            assert result["success"] is True, \
-                f"Command failed on {hostname}: {result.get('error')}"
-            assert "Testing all nodes" in result["stdout"]
+        # Check all results are successful
+        for hostname, node_result in result.results.items():
+            assert node_result["success"] is True, \
+                f"Command failed on {hostname}: {node_result.get('error')}"
+            assert "Testing all nodes" in node_result["stdout"]
         
         logger.info("✓ Run on all nodes successful")
     
@@ -287,24 +279,24 @@ class TestThunderboltProtocol:
         logger.info("Testing command summary generation...")
         
         # Execute a command
-        results = api.run_on_all_nodes(
+        result = api.run_on_all_nodes(
             command="echo 'Summary test'",
             timeout=10,
             use_sudo=False
         )
         
         # Generate summary
-        summary = api.get_command_summary(results)
+        summary = api.get_command_summary(result)
         
-        logger.info(f"Command summary: {summary}")
+        logger.info(f"Command summary: {summary.dict()}")
         
-        # Verify summary fields
-        assert summary["total_nodes"] == 2
-        assert summary["successful"] == 2
-        assert summary["failed"] == 0
-        assert summary["timed_out"] == 0
-        assert summary["failed_sends"] == 0
-        assert summary["success_rate"] == 100.0
+        # Verify summary fields using typed attributes
+        assert summary.total_nodes == 2
+        assert summary.successful == 2
+        assert summary.failed == 0
+        assert summary.timed_out == 0
+        assert summary.failed_sends == 0
+        assert summary.success_rate == 100.0
         
         logger.info("✓ Command summary generation successful")
     
@@ -318,18 +310,13 @@ class TestThunderboltProtocol:
         
         info = api.info()
         
-        logger.info(f"Master info: {info}")
+        logger.info(f"Master info: {info.dict()}")
         
-        # Verify info contains expected fields
-        assert "message" in info
-        assert "connected_slaves" in info
-        assert "command_port" in info
-        assert "health_check_port" in info
-        
-        # Verify port values
-        assert info["command_port"] == 8000
-        assert info["health_check_port"] == 8100
-        assert info["connected_slaves"] == 2
+        # Verify info contains expected fields using typed attributes
+        assert info.message is not None
+        assert info.connected_slaves == 2
+        assert info.command_port == 8000
+        assert info.health_check_port == 8100
         
         logger.info("✓ Master info endpoint working correctly")
     
@@ -356,8 +343,3 @@ class TestThunderboltProtocol:
             "Fully connected nodes should match all nodes in test"
         
         logger.info("✓ Fully connected nodes filter working correctly")
-
-
-if __name__ == "__main__":
-    # Allow running tests directly with pytest
-    pytest.main([__file__, "-v", "-s"])

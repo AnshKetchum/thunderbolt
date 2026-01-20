@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from fastapi import HTTPException
 
+from .response_models import BatchedResponse, CommandResult
+
 
 class SharedDirExecutor:
     """Executes commands via shared directory broadcast."""
@@ -40,10 +42,10 @@ class SharedDirExecutor:
         nodes: List[str],
         timeout: int,
         use_sudo: bool
-    ) -> Dict:
+    ) -> List[CommandResult]:
         """Execute command via shared directory broadcast."""
         command_id = str(uuid.uuid4())
-        
+
         job_data = {
             "type": "command",
             "command_id": command_id,
@@ -53,60 +55,105 @@ class SharedDirExecutor:
             "nodes": nodes,
             "created_at": datetime.now().isoformat()
         }
-        
+
         # Write job to jobs.json
         self._write_job(command_id, job_data)
-        
+
         print(f"[Thunderbolt] Broadcast job {command_id} to {len(nodes)} nodes via shared dir")
-        
+
         # Poll for completion
-        results = await self._poll_results(command_id, nodes, timeout)
+        raw_results = await self._poll_results(command_id, nodes, timeout)
+
+        # Reconstruct CommandResult list (preserve order of nodes)
+        results: List[CommandResult] = []
+        for hostname in nodes:
+            if hostname in raw_results:
+                rd = raw_results[hostname]
+                results.append(CommandResult(
+                    command_uuid=command_id,
+                    node=hostname,
+                    command=command,
+                    stdout=rd.get("stdout"),
+                    stderr=rd.get("stderr"),
+                    exit_code=rd.get("exit_code"),
+                    error=rd.get("error"),
+                    timed_out=rd.get("timed_out", False)
+                ))
+            else:
+                results.append(CommandResult(
+                    command_uuid=command_id,
+                    node=hostname,
+                    command=command,
+                    error="No response received",
+                    timed_out=True
+                ))
 
         # Cleanup job and result files
         self._cleanup_job(command_id, nodes)
-        
-        return {
-            "command": command,
-            "total_nodes": len(nodes),
-            "responses_received": len(results),
-            "method": "shared_directory",
-            "results": results
-        }
-    
-    async def execute_batched(self, node_queues: Dict[str, List[dict]]) -> Dict:
+
+        return results
+ 
+    async def execute_batched(self, command_specs: List[dict]) -> BatchedResponse:
         """Execute batched commands via shared directory."""
-        command_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
         
+        # Build job data with command UUIDs
         job_data = {
             "type": "batched_command",
-            "command_id": command_id,
-            "node_commands": node_queues,
+            "job_id": job_id,
+            "commands": command_specs,
             "created_at": datetime.now().isoformat()
         }
         
         # Write job
-        self._write_job(command_id, job_data)
+        self._write_job(job_id, job_data)
         
-        # Determine max timeout
-        max_timeout = max(
-            max(cmd["timeout"] for cmd in cmds)
-            for cmds in node_queues.values()
-        )
+        # Determine max timeout and collect unique nodes
+        max_timeout = max(cmd["timeout"] for cmd in command_specs)
+        nodes_set = {cmd["node"] for cmd in command_specs}
         
-        # Poll for completion
-        results = await self._poll_results(command_id, list(node_queues.keys()), max_timeout)
+        print(f"[Thunderbolt] Broadcast batched job {job_id} with {len(command_specs)} commands to {len(nodes_set)} nodes")
+        
+        # Poll for completion - returns dict keyed by command_uuid
+        results_dict = await self._poll_batched_results(job_id, command_specs, max_timeout)
+        
+        # Reconstruct results in original order
+        results = []
+        for cmd_spec in command_specs:
+            cmd_uuid = cmd_spec["command_uuid"]
+            if cmd_uuid in results_dict:
+                result_data = results_dict[cmd_uuid]
+                results.append(CommandResult(
+                    command_uuid=cmd_uuid,
+                    node=cmd_spec["node"],
+                    command=cmd_spec["command"],
+                    stdout=result_data.get("stdout"),
+                    stderr=result_data.get("stderr"),
+                    exit_code=result_data.get("exit_code"),
+                    error=result_data.get("error"),
+                    timed_out=result_data.get("timed_out", False)
+                ))
+            else:
+                # Command timed out or failed
+                results.append(CommandResult(
+                    command_uuid=cmd_uuid,
+                    node=cmd_spec["node"],
+                    command=cmd_spec["command"],
+                    error="No response received",
+                    timed_out=True
+                ))
         
         # Cleanup
-        self._cleanup_job(command_id, list(node_queues.keys()))
+        self._cleanup_job(job_id, list(nodes_set))
         
-        return {
-            "total_commands": sum(len(cmds) for cmds in node_queues.values()),
-            "total_nodes": len(node_queues),
-            "method": "shared_directory",
-            "results": results
-        }
+        return BatchedResponse(
+            total_commands=len(command_specs),
+            total_nodes=len(nodes_set),
+            method="shared_directory",
+            results=results
+        )
     
-    def _write_job(self, command_id: str, job_data: dict):
+    def _write_job(self, job_id: str, job_data: dict):
         """Write job to jobs file atomically."""
         try:
             jobs = {}
@@ -120,8 +167,8 @@ class SharedDirExecutor:
                         print(f"[Thunderbolt] Resetting jobs to empty dict")
                         jobs = {}
             
-            jobs[command_id] = job_data
-            print(f"[Thunderbolt] Adding job {command_id}, total jobs: {len(jobs)}")
+            jobs[job_id] = job_data
+            print(f"[Thunderbolt] Adding job {job_id}, total jobs: {len(jobs)}")
             
             temp_file = self.jobs_file.with_suffix('.tmp')
             with open(temp_file, 'w') as f:
@@ -168,7 +215,49 @@ class SharedDirExecutor:
         
         return results
     
-    def _cleanup_job(self, command_id: str, nodes: List[str]):
+    async def _poll_batched_results(
+        self, 
+        job_id: str, 
+        command_specs: List[dict], 
+        timeout: int
+    ) -> Dict[str, dict]:
+        """Poll for batched command results, keyed by command_uuid."""
+        start_time = datetime.now()
+        results = {}
+        completed_uuids = set()
+        total_commands = len(command_specs)
+        
+        # Create lookup for command specs by UUID
+        uuid_to_spec = {cmd["command_uuid"]: cmd for cmd in command_specs}
+        
+        while len(completed_uuids) < total_commands:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            if elapsed > timeout + 10:
+                print(f"[Thunderbolt] Batched job {job_id} timed out")
+                break
+            
+            for cmd_uuid, spec in uuid_to_spec.items():
+                if cmd_uuid in completed_uuids:
+                    continue
+                
+                node = spec["node"]
+                node_dir = self.shared_dir / node
+                result_file = node_dir / f"{cmd_uuid}.json"
+                
+                if result_file.exists():
+                    try:
+                        with open(result_file, 'r') as f:
+                            result_data = json.load(f)
+                        results[cmd_uuid] = result_data
+                        completed_uuids.add(cmd_uuid)
+                    except Exception as e:
+                        print(f"[Thunderbolt] Error reading result for {cmd_uuid} from {node}: {e}")
+            
+            await asyncio.sleep(self.poll_interval)
+        
+        return results
+    
+    def _cleanup_job(self, job_id: str, nodes: List[str]):
         """Cleanup job and result files."""
         try:
             jobs = {}
@@ -176,8 +265,8 @@ class SharedDirExecutor:
                 with open(self.jobs_file, 'r') as f:
                     jobs = json.load(f)
             
-            if command_id in jobs:
-                del jobs[command_id]
+            if job_id in jobs:
+                del jobs[job_id]
                 temp_file = self.jobs_file.with_suffix('.tmp')
                 with open(temp_file, 'w') as f:
                     json.dump(jobs, f, indent=2)
@@ -185,9 +274,9 @@ class SharedDirExecutor:
             
             for hostname in nodes:
                 node_dir = self.shared_dir / hostname
-                result_file = node_dir / f"{command_id}.json"
+                result_file = node_dir / f"{job_id}.json"
                 if result_file.exists():
                     result_file.unlink()
                     
         except Exception as e:
-            print(f"[Thunderbolt] Error cleaning up job {command_id}: {e}")
+            print(f"[Thunderbolt] Error cleaning up job {job_id}: {e}")

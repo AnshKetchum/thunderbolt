@@ -4,6 +4,12 @@ API Client for Thunderbolt Master
 """
 import requests
 from typing import List, Optional, Dict, Any
+from pydantic import BaseModel
+from datetime import datetime
+
+from .master_utils.execution.response_models import CommandResult, BatchedResponse
+from .api_response_formats import BatchedSummary, CommandResponse, CommandSummary, NodesListResponse, HealthResponse, InfoResponse
+
 
 
 class ThunderboltAPI:
@@ -22,20 +28,12 @@ class ThunderboltAPI:
         self.base_url = f"http://{host}:{port}{self.base_path}"
         self.session = requests.Session()
     
-    def list_nodes(self) -> Dict[str, Any]:
+    def list_nodes(self) -> NodesListResponse:
         """
         List all connected slave nodes.
         
         Returns:
-            Dict containing:
-                - total: Number of connected nodes
-                - nodes: List of node information dicts
-                    Each node dict contains:
-                        - hostname: Node hostname
-                        - last_seen: ISO timestamp of last communication
-                        - failed_healthchecks: Number of consecutive failed health checks
-                        - command_connected: Whether command channel is connected
-                        - health_connected: Whether health channel is connected
+            NodesListResponse containing total count and list of node information
         
         Raises:
             requests.exceptions.RequestException: If the request fails
@@ -43,7 +41,7 @@ class ThunderboltAPI:
         url = f"{self.base_url}/nodes"
         response = self.session.get(url)
         response.raise_for_status()
-        return response.json()
+        return NodesListResponse(**response.json())
     
     def run_command(
         self,
@@ -52,7 +50,7 @@ class ThunderboltAPI:
         timeout: int = 30,
         use_sudo: bool = False,
         force_method: Optional[str] = None
-    ) -> Dict[str, Any]:
+    ) -> CommandResponse:
         """
         Execute a command on specified nodes.
         
@@ -64,22 +62,7 @@ class ThunderboltAPI:
             force_method: Force execution method - "shared_dir" or "websocket" (default: None for auto)
         
         Returns:
-            Dict containing:
-                - command: The executed command
-                - total_nodes: Total number of target nodes
-                - responses_received: Number of responses received
-                - failed_sends: Number of nodes where command send failed
-                - results: Dict mapping hostname to result dict
-                    Each result contains:
-                        - type: "command_result"
-                        - command_id: UUID of the command
-                        - hostname: Node hostname
-                        - command: The executed command
-                        - success: Boolean indicating if command succeeded
-                        - exit_code: Exit code (if success=True)
-                        - stdout: Command standard output (if success=True)
-                        - stderr: Command standard error (if success=True)
-                        - error: Error message (if success=False)
+            CommandResponse containing execution results
         
         Raises:
             requests.exceptions.RequestException: If the request fails
@@ -97,17 +80,16 @@ class ThunderboltAPI:
         
         response = self.session.post(url, json=payload)
         response.raise_for_status()
-        return response.json()
+        return CommandResponse(**response.json())
 
     def run_batched_commands(
         self,
         commands: List[Dict[str, Any]],
         force_method: Optional[str] = None
-    ) -> Dict[str, Any]:
+    ) -> BatchedResponse:
         """
         Execute different commands on different nodes in a batched manner.
-        Commands are grouped by node and executed sequentially per node,
-        but all nodes run in parallel.
+        Results are returned in the same order as the input commands.
         
         Args:
             commands: List of command specifications, each containing:
@@ -118,16 +100,11 @@ class ThunderboltAPI:
             force_method: Force execution method - "shared_dir" or "websocket" (default: None for auto)
         
         Returns:
-            Dict containing:
+            BatchedResponse containing:
                 - total_commands: Total number of commands
                 - total_nodes: Number of unique nodes
-                - results: Dict mapping hostname to result dict
-                    Each result contains:
-                        - commands: List of command results (if successful)
-                            Each command result has:
-                                - command: The executed command string
-                                - result: Dict with success, exit_code, stdout, stderr, or error
-                        - error: Error message (if node-level failure)
+                - method: Execution method used
+                - results: List of CommandResult in the same order as input
         
         Example:
             commands = [
@@ -136,6 +113,7 @@ class ThunderboltAPI:
                 {"node": "node2", "command": "uptime", "use_sudo": False}
             ]
             result = api.run_batched_commands(commands, force_method="websocket")
+            # result.results[0] corresponds to commands[0], etc.
         
         Raises:
             requests.exceptions.RequestException: If the request fails
@@ -148,7 +126,7 @@ class ThunderboltAPI:
         
         response = self.session.post(url, json=payload)
         response.raise_for_status()
-        return response.json()
+        return BatchedResponse(**response.json())
 
     def run_on_all_nodes(
         self,
@@ -157,7 +135,7 @@ class ThunderboltAPI:
         use_sudo: bool = False,
         require_fully_connected: bool = True,
         force_method: Optional[str] = None
-    ) -> Dict[str, Any]:
+    ) -> CommandResponse:
         """
         Execute a command on all connected nodes.
         
@@ -169,7 +147,7 @@ class ThunderboltAPI:
             force_method: Force execution method - "shared_dir" or "websocket" (default: None for auto)
         
         Returns:
-            Same format as run_command()
+            CommandResponse containing execution results
         
         Raises:
             ValueError: If no nodes are connected
@@ -184,36 +162,29 @@ class ThunderboltAPI:
         
         return self.run_command(command, hostnames, timeout, use_sudo, force_method)
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> HealthResponse:
         """
         Check master server health.
         
         Returns:
-            Dict containing:
-                - status: "healthy"
-                - connected_slaves: Number of connected slave nodes
-                - pending_commands: Number of commands awaiting responses
+            HealthResponse containing status and metrics
         """
         url = f"{self.base_url}/health"
         response = self.session.get(url)
         response.raise_for_status()
-        return response.json()
+        return HealthResponse(**response.json())
     
-    def info(self) -> Dict[str, Any]:
+    def info(self) -> InfoResponse:
         """
         Get master server information.
         
         Returns:
-            Dict containing:
-                - message: Server description
-                - connected_slaves: Number of connected slaves
-                - command_port: Command WebSocket port
-                - health_check_port: Health check WebSocket port
+            InfoResponse containing server configuration details
         """
         url = f"{self.base_url}/"
         response = self.session.get(url)
         response.raise_for_status()
-        return response.json()
+        return InfoResponse(**response.json())
     
     def get_node_hostnames(self) -> List[str]:
         """
@@ -223,7 +194,7 @@ class ThunderboltAPI:
             List of hostname strings
         """
         nodes_data = self.list_nodes()
-        return [node['hostname'] for node in nodes_data['nodes']]
+        return [node.hostname for node in nodes_data.nodes]
     
     def get_fully_connected_nodes(self) -> List[str]:
         """
@@ -234,67 +205,29 @@ class ThunderboltAPI:
         """
         nodes_data = self.list_nodes()
         return [
-            node['hostname'] 
-            for node in nodes_data['nodes']
-            if node.get('command_connected') and node.get('health_connected')
+            node.hostname 
+            for node in nodes_data.nodes
+            if node.command_connected and node.health_connected
         ]
     
-    def run_on_all_nodes(
-        self,
-        command: str,
-        timeout: int = 30,
-        use_sudo: bool = False,
-        require_fully_connected: bool = True
-    ) -> Dict[str, Any]:
-        """
-        Execute a command on all connected nodes.
-        
-        Args:
-            command: Shell command to execute
-            timeout: Command timeout in seconds (default: 30)
-            use_sudo: Whether to run with sudo privileges (default: False)
-            require_fully_connected: Only run on nodes with both channels connected (default: True)
-        
-        Returns:
-            Same format as run_command()
-        
-        Raises:
-            ValueError: If no nodes are connected
-        """
-        if require_fully_connected:
-            hostnames = self.get_fully_connected_nodes()
-        else:
-            hostnames = self.get_node_hostnames()
-            
-        if not hostnames:
-            raise ValueError("No nodes are connected")
-        
-        return self.run_command(command, hostnames, timeout, use_sudo)
-    
-    def get_command_summary(self, result: Dict[str, Any]) -> Dict[str, Any]:
+    def get_command_summary(self, result: CommandResponse) -> CommandSummary:
         """
         Generate a summary of command execution results.
         
         Args:
-            result: Result dict from run_command() or run_on_all_nodes()
+            result: CommandResponse from run_command() or run_on_all_nodes()
         
         Returns:
-            Dict containing:
-                - total_nodes: Total target nodes
-                - successful: Number of successful executions
-                - failed: Number of failed executions
-                - timed_out: Number of nodes that didn't respond
-                - failed_sends: Number of nodes where send failed
-                - success_rate: Percentage of successful executions
+            CommandSummary with execution statistics
         """
-        total = result['total_nodes']
-        received = result['responses_received']
-        failed_sends = result.get('failed_sends', 0)
+        total = result.total_nodes
+        received = result.responses_received
+        failed_sends = result.failed_sends or 0
         
         successful = 0
         failed = 0
         
-        for hostname, node_result in result['results'].items():
+        for hostname, node_result in result.results.items():
             if node_result.get('success'):
                 successful += 1
             else:
@@ -302,63 +235,47 @@ class ThunderboltAPI:
         
         timed_out = total - received - failed_sends
         
-        return {
-            'total_nodes': total,
-            'successful': successful,
-            'failed': failed,
-            'timed_out': timed_out,
-            'failed_sends': failed_sends,
-            'success_rate': (successful / total * 100) if total > 0 else 0.0
-        }
+        return CommandSummary(
+            total_nodes=total,
+            successful=successful,
+            failed=failed,
+            timed_out=timed_out,
+            failed_sends=failed_sends,
+            success_rate=(successful / total * 100) if total > 0 else 0.0
+        )
     
-    def get_batched_summary(self, result: Dict[str, Any]) -> Dict[str, Any]:
+    def get_batched_summary(self, result: BatchedResponse) -> BatchedSummary:
         """
         Generate a summary of batched command execution results.
         
         Args:
-            result: Result dict from run_batched_commands()
+            result: BatchedResponse from run_batched_commands()
         
         Returns:
-            Dict containing:
-                - total_commands: Total number of commands executed
-                - total_nodes: Number of nodes involved
-                - successful_commands: Number of successful command executions
-                - failed_commands: Number of failed command executions
-                - node_failures: Number of nodes with node-level errors
-                - success_rate: Percentage of successful command executions
+            BatchedSummary with execution statistics
         """
-        total_commands = result['total_commands']
-        total_nodes = result['total_nodes']
+        total_commands = result.total_commands
+        total_nodes = result.total_nodes
         
         successful_commands = 0
         failed_commands = 0
-        node_failures = 0
         
-        for hostname, node_result in result['results'].items():
-            if 'error' in node_result:
-                # Node-level failure
-                node_failures += 1
-                # Count all commands for this node as failed
-                failed_commands += len([
-                    cmd for cmd in result.get('commands', [])
-                    if cmd.get('node') == hostname
-                ])
+        for cmd_result in result.results:
+            if cmd_result.error or cmd_result.timed_out:
+                failed_commands += 1
+            elif cmd_result.exit_code == 0:
+                successful_commands += 1
             else:
-                # Process individual command results
-                for cmd_result in node_result.get('commands', []):
-                    if cmd_result['result'].get('success'):
-                        successful_commands += 1
-                    else:
-                        failed_commands += 1
+                failed_commands += 1
         
-        return {
-            'total_commands': total_commands,
-            'total_nodes': total_nodes,
-            'successful_commands': successful_commands,
-            'failed_commands': failed_commands,
-            'node_failures': node_failures,
-            'success_rate': (successful_commands / total_commands * 100) if total_commands > 0 else 0.0
-        }
+        return BatchedSummary(
+            total_commands=total_commands,
+            total_nodes=total_nodes,
+            successful_commands=successful_commands,
+            failed_commands=failed_commands,
+            node_failures=0,  # Not applicable with new model
+            success_rate=(successful_commands / total_commands * 100) if total_commands > 0 else 0.0
+        )
     
     def close(self):
         """Close the underlying session."""

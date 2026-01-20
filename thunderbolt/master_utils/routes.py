@@ -1,6 +1,7 @@
 from fastapi import HTTPException, APIRouter
 from pydantic import BaseModel
 from typing import List, Dict, Optional
+import uuid
 
 
 class CommandRequest(BaseModel):
@@ -14,6 +15,24 @@ class CommandRequest(BaseModel):
 class BatchedCommandRequest(BaseModel):
     commands: List[Dict]
     force_method: Optional[str] = None
+
+
+class CommandResult(BaseModel):
+    command_uuid: str
+    node: str
+    command: str
+    stdout: Optional[str] = None
+    stderr: Optional[str] = None
+    exit_code: Optional[int] = None
+    error: Optional[str] = None
+    timed_out: bool = False
+
+
+class BatchedResponse(BaseModel):
+    total_commands: int
+    total_nodes: int
+    method: str
+    results: List[CommandResult]
 
 
 def create_router(master) -> APIRouter:
@@ -65,18 +84,21 @@ def create_router(master) -> APIRouter:
                 request.use_sudo
             )
     
-    @router.post("/run_batched")
+    @router.post("/run_batched", response_model=BatchedResponse)
     async def run_batched_commands(request: BatchedCommandRequest):
         """Execute different commands on different nodes in parallel."""
         if not request.commands:
-            return {
-                "total_commands": 0,
-                "total_nodes": 0,
-                "results": {}
-            }
+            return BatchedResponse(
+                total_commands=0,
+                total_nodes=0,
+                method="none",
+                results=[]
+            )
         
-        # Organize commands by node
-        node_queues = {}
+        # Assign UUID to each command and preserve order
+        command_specs = []
+        nodes_set = set()
+        
         for cmd_spec in request.commands:
             node = cmd_spec.get("node")
             command = cmd_spec.get("command")
@@ -85,18 +107,19 @@ def create_router(master) -> APIRouter:
             
             if not node or not command:
                 continue
-                
-            if node not in node_queues:
-                node_queues[node] = []
             
-            node_queues[node].append({
+            command_uuid = str(uuid.uuid4())
+            command_specs.append({
+                "command_uuid": command_uuid,
+                "node": node,
                 "command": command,
                 "timeout": timeout,
                 "use_sudo": use_sudo
             })
+            nodes_set.add(node)
         
         # Validate all nodes exist
-        invalid_nodes = [node for node in node_queues.keys() if node not in master.slaves]
+        invalid_nodes = [node for node in nodes_set if node not in master.slaves]
         if invalid_nodes:
             raise HTTPException(
                 status_code=404,
@@ -115,13 +138,16 @@ def create_router(master) -> APIRouter:
         elif request.force_method == "websocket":
             use_shared_dir = False
         else:
-            total_commands = len(request.commands)
+            total_commands = len(command_specs)
             use_shared_dir = master._should_use_shared_dir(total_commands)
         
         if use_shared_dir:
-            return await master.shared_dir_executor.execute_batched(node_queues)
+            response = await master.shared_dir_executor.execute_batched(command_specs)
         else:
-            return await master.ws_executor.execute_batched(node_queues)
+            response = await master.ws_executor.execute_batched(command_specs)
+        
+        print(f"Master sending response {response}") 
+        return response
     
     @router.get("/nodes")
     async def list_nodes():
